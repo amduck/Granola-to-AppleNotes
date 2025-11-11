@@ -1,25 +1,21 @@
 # Granola to Apple Notes Sync
 
-A Node.js script that automatically syncs your [Granola AI](https://granola.ai) meeting notes to Apple Notes on macOS with full customization options.
+A Node.js application that syncs your [Granola AI](https://granola.ai) meeting notes to Apple Notes on macOS. Features a modern web UI for easy control and monitoring.
 
 ![Version](https://img.shields.io/badge/version-1.0.0-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 
 ## 🚀 Features
 
-- **🔄 Automatic Sync**: Configurable auto-sync from every minute to daily, or manual-only
-- **📅 Custom Date Formats**: Support for multiple date formats (YYYY-MM-DD, DD-MM-YYYY, etc.)
-- **📝 Flexible Filename Templates**: Customize how notes are named with variables like date, time, and title
-- **📁 Apple Notes Folder Support**: Organize notes into specific folders in Apple Notes
-- **🏷️ Note Prefixes**: Add custom prefixes to all synced notes
-- **🔧 Custom Auth Path**: Override the default Granola credentials location
-- **🏷️ Attendee Tagging**: Automatically extract meeting attendees and add them as organized tags
-- **🔗 Granola URL Links**: Add direct links back to original Granola notes for easy access
-- **🔧 Smart Filtering**: Exclude your own name from attendee tags with configurable settings
-- **🛡️ Preserve Manual Additions**: Option to skip updating existing notes, preserving your edits
-- **✨ Rich Metadata**: Includes metadata with creation/update dates and Granola IDs
+- **🌐 Web UI**: Beautiful, modern web interface for controlling sync operations
+- **🔄 Bulk Sync**: Efficient bulk import with proper line break handling
+- **🧪 Test Mode**: Toggle test mode with configurable limit (default: 10 notes)
+- **📊 Real-time Status**: Live sync progress and status monitoring
+- **🗑️ Delete All Notes**: One-click deletion of all synced notes
+- **📁 Apple Notes Folder Support**: Organize notes into specific folders
+- **🔗 Granola URL Links**: Optional links back to original Granola notes
 - **📋 Content Conversion**: Converts ProseMirror content to clean Markdown
-- **🔄 Update Handling**: Intelligently updates existing notes instead of creating duplicates
-- **📁 Granola Folder Organization**: Mirror your Granola folder structure in Apple Notes
+- **🔄 Full Resync**: Deletes and re-imports all notes for consistency
+- **⚙️ Configurable Settings**: Extensive configuration options via web UI and config file
 
 ## 📋 Requirements
 
@@ -32,21 +28,65 @@ A Node.js script that automatically syncs your [Granola AI](https://granola.ai) 
 
 1. **Clone or download this repository**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/amduck/Granola-to-AppleNotes.git
    cd Granola-to-AppleNotes
    ```
 
-2. **Copy the example config file**
+2. **Install dependencies**
+   ```bash
+   npm install
+   ```
+
+3. **Copy the example config file**
    ```bash
    cp config.json.example config.json
    ```
 
-3. **Edit `config.json`** with your settings (see Configuration section below)
+4. **Edit `config.json`** with your settings (see Configuration section below)
 
-4. **Run the sync**
-   ```bash
-   node main.js --sync
-   ```
+## 🎯 Usage
+
+### Web UI (Recommended)
+
+Start the web server:
+
+```bash
+npm start
+# or
+npm run ui
+# or
+node ui-server.js
+```
+
+Then open your browser to:
+```
+http://localhost:3000
+```
+
+The web UI provides:
+- **Start Sync**: Begin syncing notes from Granola to Apple Notes
+- **Stop Sync**: Cancel an ongoing sync operation
+- **Delete All Notes**: Remove all notes from the Apple Notes folder
+- **Test Mode Toggle**: Enable/disable test mode (limits sync to N notes)
+- **Test Mode Limit**: Configure how many notes to sync in test mode
+- **Real-time Status**: View sync progress, last sync time, and errors
+- **Configuration Display**: See all current settings
+
+### Command Line (Alternative)
+
+You can also run sync directly from the command line:
+
+```bash
+# Single sync
+npm run sync
+# or
+node main.js --sync
+
+# Auto-sync (runs continuously)
+npm run auto-sync
+# or
+node main.js --auto-sync
+```
 
 ## ⚙️ Configuration
 
@@ -58,10 +98,21 @@ Edit `config.json` to customize your sync settings:
   - Common values: `"iCloud"`, `"On My Mac"`, or your email address
   - To find your account name, open Apple Notes and check the sidebar
 
-- **`appleNotesFolder`**: The folder name within the account (default: `""` for root)
+- **`appleNotesFolder`**: The folder name within the account (default: `"Granola"`)
   - Leave empty to sync to the root of the account
   - Specify a folder name to organize notes (folder will be created if it doesn't exist)
-  - Example: `"Granola Notes"` or `"Meetings"`
+  - Example: `"Granola"` or `"Meetings"`
+
+### Test Mode
+
+- **`testMode`**: Enable test mode to sync only a limited number of notes (default: `false`)
+  - When enabled, only syncs the number of notes specified in `testModeLimit`
+  - Useful for testing before syncing all notes
+  - Can be toggled in the web UI
+
+- **`testModeLimit`**: Number of notes to sync when test mode is enabled (default: `10`)
+  - Can be configured in the web UI
+  - Minimum value: 1
 
 ### Granola Authentication
 
@@ -73,7 +124,7 @@ Edit `config.json` to customize your sync settings:
 
 - **`notePrefix`**: Optional prefix to add to all synced note titles (e.g., `"Meeting: "`)
 
-- **`filenameTemplate`**: Template for note titles (not filenames in Apple Notes, but used for organization)
+- **`filenameTemplate`**: Template for note titles
   - Variables: `{title}`, `{id}`, `{created_date}`, `{updated_date}`, `{created_time}`, `{updated_time}`, `{created_datetime}`, `{updated_datetime}`
   - Example: `"{created_date} - {title}"`
 
@@ -93,6 +144,7 @@ Edit `config.json` to customize your sync settings:
   - `86400000` = every 24 hours
 
 - **`skipExistingNotes`**: If `true`, existing notes won't be updated (preserves your manual edits)
+  - Note: Current implementation uses full resync (delete and re-import), so this setting may not apply
 
 - **`includeFullTranscript`**: If `true`, includes the full meeting transcript in each note
 
@@ -107,49 +159,17 @@ Edit `config.json` to customize your sync settings:
 - **`folderTagTemplate`**: Template for folder tags (use `{name}` placeholder)
 - **`includeGranolaUrl`**: If `true`, adds a link back to the original Granola note
 
-## 🎯 Usage
+## 🔧 How It Works
 
-### Manual Sync
-
-Run a single sync operation:
-
-```bash
-node main.js --sync
-# or
-node main.js -s
-```
-
-### Auto-Sync
-
-Start continuous auto-sync (runs in the foreground):
-
-```bash
-node main.js --auto-sync
-# or
-node main.js -a
-```
-
-Press `Ctrl+C` to stop auto-sync.
-
-### Help
-
-View usage information:
-
-```bash
-node main.js --help
-# or
-node main.js -h
-```
-
-### Using npm scripts (if you prefer)
-
-If you've set up the project, you can also use:
-
-```bash
-npm run sync        # Single sync
-npm run auto-sync   # Start auto-sync
-npm start           # Start auto-sync (alias)
-```
+1. **Authentication**: Reads your Granola authentication token from the local Granola app data
+2. **API Integration**: Fetches your notes from the Granola API (with pagination support)
+3. **Content Conversion**: Converts ProseMirror format to Markdown
+4. **Bulk Import Process**:
+   - Deletes all existing notes in the target Apple Notes folder
+   - Downloads and saves all notes as temporary markdown files
+   - Bulk imports all markdown files into Apple Notes with proper line breaks
+5. **Apple Notes Integration**: Uses AppleScript to create notes directly in Apple Notes
+6. **Line Break Handling**: Properly converts Unix newlines to AppleScript return characters for correct formatting
 
 ## 📄 Note Format
 
@@ -171,24 +191,24 @@ Your converted meeting content appears here in clean Markdown format.
 
 - Action items are preserved
 - Headings maintain their structure
+- Line breaks are properly formatted
 - All formatting is converted appropriately
 ```
 
-## 🔧 How It Works
-
-1. **Authentication**: Reads your Granola authentication token from the local Granola app data
-2. **API Integration**: Fetches your notes from the Granola API
-3. **Content Conversion**: Converts ProseMirror format to Markdown
-4. **Apple Notes Integration**: Uses AppleScript to create/update notes in Apple Notes
-5. **Duplicate Detection**: Checks for existing notes by Granola ID to avoid duplicates
-
 ## 🐛 Troubleshooting
+
+### Web UI Won't Start
+
+- **Port already in use**: Another process may be using port 3000
+  - Kill the existing process: `lsof -ti:3000 | xargs kill -9`
+  - Or use a different port: `PORT=3001 node ui-server.js`
+- **Check Node.js version**: Run `node --version` (needs v12+)
 
 ### Script Won't Run
 
-- **Check Node.js version**: Run `node --version` (needs v12+)
-- **Check file permissions**: Ensure `main.js` and `create-note.applescript` are executable
+- **Check file permissions**: Ensure `main.js` and `ui-server.js` are executable
 - **Check macOS version**: Apple Notes scripting requires macOS
+- **Check dependencies**: Run `npm install` to ensure all dependencies are installed
 
 ### No Notes Syncing
 
@@ -196,6 +216,7 @@ Your converted meeting content appears here in clean Markdown format.
 - **Check Granola app**: Ensure Granola desktop app is logged in
 - **Check API access**: Verify you have meeting notes in your Granola account
 - **Check console output**: Look for error messages in the terminal
+- **Try test mode**: Enable test mode in the UI to sync just a few notes first
 
 ### Authentication Issues
 
@@ -213,13 +234,14 @@ Your converted meeting content appears here in clean Markdown format.
   - Go to System Preferences → Security & Privacy → Privacy → Automation
   - Allow Terminal/iTerm/your terminal app to control Notes
 - **Folder creation**: If folder doesn't exist, the script will create it automatically
-- **Note not updating**: Check that `skipExistingNotes` is `false` if you want updates
+- **Line breaks not working**: Ensure you're using the latest version with improved line break handling
 
 ### Content Issues
 
 - **Missing content**: Some notes may not have content if they're empty in Granola
 - **Formatting issues**: Markdown conversion preserves most formatting, but some complex structures may be simplified
 - **Transcript missing**: Ensure `includeFullTranscript` is `true` if you want transcripts
+- **Title lost on resync**: The current implementation uses full resync, so titles should be preserved correctly
 
 ## 🔒 Security & Privacy
 
@@ -227,6 +249,21 @@ Your converted meeting content appears here in clean Markdown format.
 - **No cloud upload**: Your notes never leave your computer
 - **Uses existing auth**: Reads Granola credentials already stored locally
 - **AppleScript permissions**: First run may require granting terminal app permission to control Notes
+- **Web UI**: The web server runs locally on `localhost:3000` and is not accessible from other machines
+
+## 📝 Project Structure
+
+```
+Granola-to-AppleNotes/
+├── main.js              # Core sync functionality
+├── ui-server.js         # Web server for the UI
+├── ui.html              # Web UI frontend
+├── config.json          # Your configuration (create from config.json.example)
+├── config.json.example  # Example configuration file
+├── package.json         # Node.js dependencies and scripts
+├── create-note.applescript  # AppleScript helper (legacy, kept for reference)
+└── readme.md            # This file
+```
 
 ## 🤝 Contributing
 
@@ -244,7 +281,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/Granola-to-AppleNotes/issues)
+- **Issues**: [GitHub Issues](https://github.com/amduck/Granola-to-AppleNotes/issues)
 - **Documentation**: This README
 
 ---
