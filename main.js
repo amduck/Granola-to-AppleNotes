@@ -1,171 +1,397 @@
-const obsidian = require('obsidian');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+const os = require('os');
 
-function getDefaultAuthPath() {
-	if (obsidian.Platform.isWin) {
-		return 'AppData/Roaming/Granola/supabase.json';
-	} else if (obsidian.Platform.isLinux) {
-		return '.config/Granola/supabase.json';
-	} else {
-		// Default to macOS path
-		return 'Library/Application Support/Granola/supabase.json';
-	}
-}
-
+// Default settings
 const DEFAULT_SETTINGS = {
-	syncDirectory: 'Granola',
 	notePrefix: '',
 	authKeyPath: getDefaultAuthPath(),
 	filenameTemplate: '{title}',
 	dateFormat: 'YYYY-MM-DD',
-	autoSyncFrequency: 300000,
-	enableDailyNoteIntegration: false,
-	dailyNoteSectionName: '## Granola Meetings',
-	enablePeriodicNoteIntegration: false,
-	periodicNoteSectionName: '## Granola Meetings',
+	autoSyncFrequency: 300000, // 5 minutes in milliseconds
+	includeFullTranscript: false,
 	skipExistingNotes: false,
 	includeAttendeeTags: false,
 	excludeMyNameFromTags: true,
-	myName: 'Danny McClelland',
+	myName: '',
 	includeFolderTags: false,
 	includeGranolaUrl: false,
 	attendeeTagTemplate: 'person/{name}',
-	existingNoteSearchScope: 'syncDirectory', // 'syncDirectory', 'entireVault', 'specificFolders'
-	specificSearchFolders: [], // Array of folder paths to search in when existingNoteSearchScope is 'specificFolders'
-	enableDateBasedFolders: false,
-	dateFolderFormat: 'YYYY-MM-DD',
-	enableGranolaFolders: false, // Enable folder-based organization
-	folderTagTemplate: 'folder/{name}', // Template for folder tags
-	filenameSeparator: '_', // Character to separate words in filenames ('_', '-', or '')
-	existingFileAction: 'timestamp', // 'timestamp' - create timestamped version, 'skip' - ignore existing file
+	folderTagTemplate: 'folder/{name}',
+	appleNotesAccount: 'iCloud', // Default to iCloud, can be 'On My Mac' or other account names
+	appleNotesFolder: '', // Empty means root folder, otherwise specify folder name
+	testMode: false, // Test mode - only sync limited number of notes
+	testModeLimit: 10, // Number of notes to sync in test mode
+	preserveTitlesOnUpdate: true, // If true, skip body updates when title is already correct (prevents title loss)
 };
 
-class GranolaSyncPlugin extends obsidian.Plugin {
-	async onload() {
+// Load settings from config file
+function loadSettings() {
+	const configPath = path.join(__dirname, 'config.json');
+	if (fs.existsSync(configPath)) {
+		try {
+			const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+			return Object.assign({}, DEFAULT_SETTINGS, config);
+		} catch (error) {
+			console.error('Error loading config.json:', error);
+			return DEFAULT_SETTINGS;
+		}
+	}
+	return DEFAULT_SETTINGS;
+}
+
+// Save settings to config file
+function saveSettings(settings) {
+	const configPath = path.join(__dirname, 'config.json');
+	try {
+		fs.writeFileSync(configPath, JSON.stringify(settings, null, 2), 'utf8');
+	} catch (error) {
+		console.error('Error saving config.json:', error);
+	}
+}
+
+function getDefaultAuthPath() {
+	const platform = os.platform();
+	if (platform === 'win32') {
+		return 'AppData/Roaming/Granola/supabase.json';
+	} else if (platform === 'linux') {
+		return '.config/Granola/supabase.json';
+	} else {
+		// macOS
+		return 'Library/Application Support/Granola/supabase.json';
+	}
+}
+
+class GranolaToAppleNotes {
+	constructor() {
+		this.settings = loadSettings();
 		this.autoSyncInterval = null;
-		this.settings = DEFAULT_SETTINGS;
-		this.statusBarItem = null;
-		this.ribbonIconEl = null;
-		
-		try {
-			const data = await this.loadData();
-			if (data) {
-				this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+		this.documentToFolderMap = {};
+		this.syncStatus = {
+			isRunning: false,
+			lastSyncTime: null,
+			lastSyncCount: 0,
+			lastError: null,
+			currentProgress: { total: 0, processed: 0 }
+		};
+		this.shouldStopSync = false;
+	}
+
+	async loadCredentials() {
+		const homedir = os.homedir();
+		const authPaths = [
+			// Current configured path
+			path.resolve(homedir, this.settings.authKeyPath),
+			// macOS fallback locations
+			path.resolve(homedir, 'Library/Application Support/Granola/supabase.json'),
+			path.resolve(homedir, 'Users', os.userInfo().username, 'Library/Application Support/Granola/supabase.json'),
+		];
+
+		for (const authPath of authPaths) {
+			try {
+				if (!fs.existsSync(authPath)) {
+					continue;
+				}
+
+				const credentialsFile = fs.readFileSync(authPath, 'utf8');
+				const data = JSON.parse(credentialsFile);
+				
+				let accessToken = null;
+				
+				// Try new token structure (workos_tokens)
+				if (data.workos_tokens) {
+					try {
+						const workosTokens = JSON.parse(data.workos_tokens);
+						accessToken = workosTokens.access_token;
+					} catch (e) {
+						// workos_tokens might already be an object
+						accessToken = data.workos_tokens.access_token;
+					}
+				}
+				
+				// Fallback to old token structure (cognito_tokens)
+				if (!accessToken && data.cognito_tokens) {
+					try {
+						const cognitoTokens = JSON.parse(data.cognito_tokens);
+						accessToken = cognitoTokens.access_token;
+					} catch (e) {
+						// cognito_tokens might already be an object
+						accessToken = data.cognito_tokens.access_token;
+					}
+				}
+				
+				if (accessToken) {
+					console.log('Successfully loaded credentials from:', authPath);
+					return accessToken;
+				}
+			} catch (error) {
+				console.error('Error reading credentials from', authPath, ':', error);
+				continue;
 			}
-		} catch (error) {
-			// Could not load settings, using defaults
 		}
 
-		this.statusBarItem = this.addStatusBarItem();
-		this.updateStatusBar('Idle');
-
-		// Add ribbon icon for syncing
-		this.ribbonIconEl = this.addRibbonIcon('sync', 'Sync Granola notes', () => {
-			this.syncNotes();
-		});
-
-		// Add ribbon icon for finding duplicates
-		this.ribbonDuplicatesEl = this.addRibbonIcon('search', 'Find duplicate Granola notes', () => {
-			this.findDuplicatesAndOpen();
-		});
-
-		this.addCommand({
-			id: 'sync-granola-notes',
-			name: 'Sync Granola Notes',
-			callback: () => {
-				this.syncNotes();
-			}
-		});
-
-		this.addCommand({
-			id: 'find-duplicate-granola-notes',
-			name: 'Find Duplicate Granola Notes',
-			callback: () => {
-				this.findDuplicatesAndOpen();
-			}
-		});
-
-		this.addSettingTab(new GranolaSyncSettingTab(this.app, this));
-
-		window.setTimeout(() => {
-			this.setupAutoSync();
-		}, 1000);
+		console.error('No valid credentials found in any of the expected locations');
+		return null;
 	}
 
-	onunload() {
-		this.clearAutoSync();
-	}
-
-	async saveSettings() {
+	async fetchGranolaDocuments(token, offset = 0, limit = 100) {
 		try {
-			await this.saveData(this.settings);
-			this.setupAutoSync();
+			const https = require('https');
+			const zlib = require('zlib');
+			
+			const postData = JSON.stringify({
+				limit: limit,
+				offset: offset,
+				include_last_viewed_panel: true
+			});
+
+			const options = {
+				hostname: 'api.granola.ai',
+				path: '/v2/get-documents',
+				method: 'POST',
+				headers: {
+					'Authorization': 'Bearer ' + token,
+					'Content-Type': 'application/json',
+					'Accept': '*/*',
+					'User-Agent': 'Granola/5.354.0',
+					'X-Client-Version': '5.354.0',
+					'Content-Length': Buffer.byteLength(postData),
+					'Accept-Encoding': 'gzip, deflate'
+				}
+			};
+
+			return new Promise((resolve, reject) => {
+				const req = https.request(options, (res) => {
+					let chunks = [];
+					
+					// Handle compressed responses
+					let stream = res;
+					if (res.headers['content-encoding'] === 'gzip') {
+						stream = zlib.createGunzip();
+						res.pipe(stream);
+					} else if (res.headers['content-encoding'] === 'deflate') {
+						stream = zlib.createInflate();
+						res.pipe(stream);
+					}
+					
+					stream.on('data', (chunk) => {
+						chunks.push(chunk);
+					});
+					
+					stream.on('end', () => {
+						try {
+							const data = Buffer.concat(chunks).toString('utf8');
+							const apiResponse = JSON.parse(data);
+							if (!apiResponse || !apiResponse.docs) {
+								console.error('API response format is unexpected');
+								resolve(null);
+							} else {
+								resolve(apiResponse);
+							}
+						} catch (error) {
+							console.error('Error parsing API response:', error);
+							console.error('Response data preview:', Buffer.concat(chunks).toString('utf8').substring(0, 200));
+							reject(error);
+						}
+					});
+					
+					stream.on('error', (error) => {
+						console.error('Stream error:', error);
+						reject(error);
+					});
+				});
+
+				req.on('error', (error) => {
+					console.error('Error fetching documents:', error);
+					reject(error);
+				});
+
+				req.write(postData);
+				req.end();
+			});
 		} catch (error) {
-			console.error('Failed to save settings:', error);
+			console.error('Error fetching documents:', error);
+			return null;
 		}
 	}
 
-	async saveSettingsWithoutSync() {
+	async fetchAllGranolaDocuments(token) {
+		const allDocuments = [];
+		let offset = 0;
+		const limit = 100;
+		let hasMore = true;
+
+		while (hasMore) {
+			const response = await this.fetchGranolaDocuments(token, offset, limit);
+			if (!response || !response.docs) {
+				break;
+			}
+
+			const docs = response.docs;
+			allDocuments.push(...docs);
+
+			// If we got fewer than the limit, we've reached the end
+			if (docs.length < limit) {
+				hasMore = false;
+			} else {
+				offset += limit;
+				console.log(`Fetched ${allDocuments.length} documents so far...`);
+			}
+		}
+
+		return allDocuments;
+	}
+
+	async fetchGranolaFolders(token) {
 		try {
-			await this.saveData(this.settings);
+			const https = require('https');
+			const zlib = require('zlib');
+			
+			const postData = JSON.stringify({
+				include_document_ids: true,
+				include_only_joined_lists: false
+			});
+
+			const options = {
+				hostname: 'api.granola.ai',
+				path: '/v1/get-document-lists-metadata',
+				method: 'POST',
+				headers: {
+					'Authorization': 'Bearer ' + token,
+					'Content-Type': 'application/json',
+					'Accept': 'application/json',
+					'Content-Length': Buffer.byteLength(postData),
+					'Accept-Encoding': 'gzip, deflate'
+				}
+			};
+
+			return new Promise((resolve, reject) => {
+				const req = https.request(options, (res) => {
+					let chunks = [];
+					
+					// Handle compressed responses
+					let stream = res;
+					if (res.headers['content-encoding'] === 'gzip') {
+						stream = zlib.createGunzip();
+						res.pipe(stream);
+					} else if (res.headers['content-encoding'] === 'deflate') {
+						stream = zlib.createInflate();
+						res.pipe(stream);
+					}
+					
+					stream.on('data', (chunk) => {
+						chunks.push(chunk);
+					});
+					
+					stream.on('end', () => {
+						try {
+							const data = Buffer.concat(chunks).toString('utf8');
+							const apiResponse = JSON.parse(data);
+							if (!apiResponse || !apiResponse.lists) {
+								console.error('Folders API response format is unexpected');
+								resolve(null);
+							} else {
+								const folders = Object.values(apiResponse.lists);
+								resolve(folders);
+							}
+						} catch (error) {
+							console.error('Error parsing folders API response:', error);
+							reject(error);
+						}
+					});
+					
+					stream.on('error', (error) => {
+						console.error('Stream error:', error);
+						reject(error);
+					});
+				});
+
+				req.on('error', (error) => {
+					console.error('Error fetching folders:', error);
+					reject(error);
+				});
+
+				req.write(postData);
+				req.end();
+			});
 		} catch (error) {
-			console.error('Failed to save settings:', error);
+			console.error('Error fetching folders:', error);
+			return null;
 		}
 	}
 
-	updateStatusBar(status, count) {
-		if (!this.statusBarItem) return;
-		
-		let text = 'Granola Sync: ';
-		
-		if (status === 'Idle') {
-			text += 'Idle';
-		} else if (status === 'Syncing') {
-			text += 'Syncing...';
-		} else if (status === 'Complete') {
-			text += count + ' notes synced';
-			window.setTimeout(() => {
-				this.updateStatusBar('Idle');
-			}, 3000);
-		} else if (status === 'Error') {
-			text += 'Error - ' + (count || 'sync failed');
-			window.setTimeout(() => {
-				this.updateStatusBar('Idle');
-			}, 5000);
+	async fetchTranscript(token, docId) {
+		try {
+			const https = require('https');
+			const zlib = require('zlib');
+			
+			const postData = JSON.stringify({
+				'document_id': docId
+			});
+
+			const options = {
+				hostname: 'api.granola.ai',
+				path: '/v1/get-document-transcript',
+				method: 'POST',
+				headers: {
+					'Authorization': 'Bearer ' + token,
+					'Content-Type': 'application/json',
+					'Accept': 'application/json',
+					'Content-Length': Buffer.byteLength(postData),
+					'Accept-Encoding': 'gzip, deflate'
+				}
+			};
+
+			return new Promise((resolve, reject) => {
+				const req = https.request(options, (res) => {
+					let chunks = [];
+					
+					// Handle compressed responses
+					let stream = res;
+					if (res.headers['content-encoding'] === 'gzip') {
+						stream = zlib.createGunzip();
+						res.pipe(stream);
+					} else if (res.headers['content-encoding'] === 'deflate') {
+						stream = zlib.createInflate();
+						res.pipe(stream);
+					}
+					
+					stream.on('data', (chunk) => {
+						chunks.push(chunk);
+					});
+					
+					stream.on('end', () => {
+						try {
+							const data = Buffer.concat(chunks).toString('utf8');
+							const apiResponse = JSON.parse(data);
+							resolve(apiResponse);
+						} catch (error) {
+							console.error('Error parsing transcript API response:', error);
+							reject(error);
+						}
+					});
+					
+					stream.on('error', (error) => {
+						console.error('Stream error:', error);
+						reject(error);
+					});
+				});
+
+				req.on('error', (error) => {
+					console.error('Error fetching transcript for document ' + docId + ':', error);
+					reject(error);
+				});
+
+				req.write(postData);
+				req.end();
+			});
+		} catch (error) {
+			console.error('Error fetching transcript:', error);
+			return null;
 		}
-		
-		this.statusBarItem.setText(text);
 	}
 
-	setupAutoSync() {
-		this.clearAutoSync();
-		
-		if (this.settings.autoSyncFrequency > 0) {
-			this.autoSyncInterval = window.setInterval(() => {
-				this.syncNotes();
-			}, this.settings.autoSyncFrequency);
-		}
-	}
-
-	clearAutoSync() {
-		if (this.autoSyncInterval) {
-			window.clearInterval(this.autoSyncInterval);
-			this.autoSyncInterval = null;
-		}
-	}
-
-	getFrequencyLabel(frequency) {
-		const minutes = frequency / (1000 * 60);
-		const hours = frequency / (1000 * 60 * 60);
-		
-		if (frequency === 0) return 'Disabled';
-		if (frequency < 60000) return (frequency / 1000) + ' seconds';
-		if (minutes < 60) return minutes + ' minutes';
-		return hours + ' hours';
-	}
-
-	// Helper function to get a readable speaker label
 	getSpeakerLabel(source) {
 		switch (source) {
 			case "microphone":
@@ -174,9 +400,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			default:
 				return "Them";
 		}
-	}	
+	}
 
-	// Helper function to format timestamp for display
 	formatTimestamp(timestamp) {
 		const d = new Date(timestamp);
 		return [d.getHours(), d.getMinutes(), d.getSeconds()]
@@ -228,252 +453,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		flushCurrentSegment();
 
 		return lines.length === 0 ? "*No transcript content available*" : lines.join("\n\n");
-
-	}
-
-	async syncNotes() {
-		try {
-			this.updateStatusBar('Syncing');
-			
-			await this.ensureDirectoryExists();
-
-			const token = await this.loadCredentials();
-			if (!token) {
-				this.updateStatusBar('Error', 'credentials failed');
-				return;
-			}
-
-			const documents = await this.fetchGranolaDocuments(token);
-			if (!documents) {
-				this.updateStatusBar('Error', 'fetch failed');
-				return;
-			}
-
-			// Fetch folders if folder support is enabled
-			let folders = null;
-			if (this.settings.enableGranolaFolders) {
-				folders = await this.fetchGranolaFolders(token);
-				if (folders) {
-					// Create a mapping of document ID to folder for quick lookup
-					this.documentToFolderMap = {};
-					for (const folder of folders) {
-						if (folder.document_ids) {
-							for (const docId of folder.document_ids) {
-								this.documentToFolderMap[docId] = folder;
-							}
-						}
-					}
-				}
-			}
-
-			let syncedCount = 0;
-			const todaysNotes = [];
-			const today = new Date().toDateString();
-
-			for (let i = 0; i < documents.length; i++) {
-				const doc = documents[i];
-				try {
-					// Fetch transcript if enabled
-					if (this.settings.includeFullTranscript) {
-						const transcriptData = await this.fetchTranscript(token, doc.id);
-						doc.transcript = this.transcriptToMarkdown(transcriptData);
-					}
-
-					const success = await this.processDocument(doc);
-					if (success) {
-						syncedCount++;
-					}
-					
-					// Check for note integration regardless of sync success
-					// This ensures existing notes from today are still included
-					if ((this.settings.enableDailyNoteIntegration || this.settings.enablePeriodicNoteIntegration) && doc.created_at) {
-						const noteDate = new Date(doc.created_at).toDateString();
-						if (noteDate === today) {
-							// Find the actual file that was created or already exists
-							const actualFile = await this.findExistingNoteByGranolaId(doc.id);
-							
-							if (actualFile) {
-								const noteData = {};
-								noteData.title = doc.title || 'Untitled Granola Note';
-								noteData.actualFilePath = actualFile.path; // Use actual file path
-								
-								const createdDate = new Date(doc.created_at);
-								const hours = String(createdDate.getHours()).padStart(2, '0');
-								const minutes = String(createdDate.getMinutes()).padStart(2, '0');
-								noteData.time = hours + ':' + minutes;
-								
-								todaysNotes.push(noteData);
-							}
-						}
-					}
-				} catch (error) {
-					console.error('Error processing document ' + doc.title + ':', error);
-				}
-			}
-
-			// Create a deep copy to prevent any reference issues
-			const todaysNotesCopy = todaysNotes.map(note => ({...note}));
-			
-			if (this.settings.enableDailyNoteIntegration && todaysNotes.length > 0) {
-				await this.updateDailyNote(todaysNotesCopy);
-			}
-
-			if (this.settings.enablePeriodicNoteIntegration && todaysNotes.length > 0) {
-				await this.updatePeriodicNote(todaysNotesCopy);
-			}
-
-			this.updateStatusBar('Complete', syncedCount);
-			
-		} catch (error) {
-			console.error('Granola sync failed:', error);
-			this.updateStatusBar('Error', 'sync failed');
-		}
-	}
-
-	async loadCredentials() {
-		const homedir = require('os').homedir();
-		const authPaths = [
-			// New location (with Users in path)
-			path.resolve(homedir, 'Users', require('os').userInfo().username, 'Library/Application Support/Granola/supabase.json'),
-			// Current configured path
-			path.resolve(homedir, this.settings.authKeyPath),
-			// Fallback to old default location
-			path.resolve(homedir, 'Library/Application Support/Granola/supabase.json')
-		];
-
-		for (const authPath of authPaths) {
-			try {
-				if (!fs.existsSync(authPath)) {
-					continue;
-				}
-
-				const credentialsFile = fs.readFileSync(authPath, 'utf8');
-				const data = JSON.parse(credentialsFile);
-				
-				let accessToken = null;
-				
-				// Try new token structure (workos_tokens)
-				if (data.workos_tokens) {
-					try {
-						const workosTokens = JSON.parse(data.workos_tokens);
-						accessToken = workosTokens.access_token;
-					} catch (e) {
-						// workos_tokens might already be an object
-						accessToken = data.workos_tokens.access_token;
-					}
-				}
-				
-				// Fallback to old token structure (cognito_tokens)
-				if (!accessToken && data.cognito_tokens) {
-					try {
-						const cognitoTokens = JSON.parse(data.cognito_tokens);
-						accessToken = cognitoTokens.access_token;
-					} catch (e) {
-						// cognito_tokens might already be an object
-						accessToken = data.cognito_tokens.access_token;
-					}
-				}
-				
-				if (accessToken) {
-					console.log('Successfully loaded credentials from:', authPath);
-					return accessToken;
-				}
-			} catch (error) {
-				console.error('Error reading credentials from', authPath, ':', error);
-				continue;
-			}
-		}
-
-		console.error('No valid credentials found in any of the expected locations');
-		return null;
-	}
-
-	async fetchGranolaDocuments(token) {
-		try {
-			const response = await obsidian.requestUrl({
-				url: 'https://api.granola.ai/v2/get-documents',
-				method: 'POST',
-				headers: {
-					'Authorization': 'Bearer ' + token,
-					'Content-Type': 'application/json',
-					'Accept': '*/*',
-					'User-Agent': 'Granola/5.354.0',
-					'X-Client-Version': '5.354.0'
-				},
-				body: JSON.stringify({
-					limit: 100,
-					offset: 0,
-					include_last_viewed_panel: true
-				})
-			});
-
-			const apiResponse = response.json;
-			
-			if (!apiResponse || !apiResponse.docs) {
-				console.error('API response format is unexpected');
-				return null;
-			}
-			
-			return apiResponse.docs;
-		} catch (error) {
-			console.error('Error fetching documents:', error);
-			return null;
-		}
-	}
-
-	async fetchGranolaFolders(token) {
-		try {
-			const response = await obsidian.requestUrl({
-				url: 'https://api.granola.ai/v1/get-document-lists-metadata',
-				method: 'POST',
-				headers: {
-					'Authorization': 'Bearer ' + token,
-					'Content-Type': 'application/json',
-					'Accept': 'application/json'
-				},
-				body: JSON.stringify({
-					include_document_ids: true,
-					include_only_joined_lists: false
-				})
-			});
-
-			const apiResponse = response.json;
-			
-			if (!apiResponse || !apiResponse.lists) {
-				console.error('Folders API response format is unexpected');
-				return null;
-			}
-
-			// Convert the lists object to an array of folders
-			const folders = Object.values(apiResponse.lists);
-			return folders;
-		} catch (error) {
-			console.error('Error fetching folders:', error);
-			return null;
-		}
-	}
-
-	async fetchTranscript(token, docId) {
-		try {
-			const response = await obsidian.requestUrl({
-				url: `https://api.granola.ai/v1/get-document-transcript`,
-				method: 'POST',
-				headers: {
-					'Authorization': 'Bearer ' + token,
-					'Content-Type': 'application/json',
-					'Accept': 'application/json',
-				},
-				body: JSON.stringify({
-					'document_id': docId
-				})
-			});
-
-			return response.json;
-
-		} catch (error) {
-			console.error('Error fetching transcript for document ' + docId + ':' + error);
-			return null;
-		}
 	}
 
 	convertProseMirrorToMarkdown(content) {
@@ -496,7 +475,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				return '#'.repeat(level) + ' ' + headingText + '\n\n';
 			} else if (nodeType === 'paragraph') {
 				const paraText = nodeContent.map(child => processNode(child, indentLevel)).join('');
-				return paraText + '\n\n';
+				// Preserve single newline for paragraphs (Apple Notes will render them)
+				return paraText + '\n';
 			} else if (nodeType === 'bulletList') {
 				const items = [];
 				for (let i = 0; i < nodeContent.length; i++) {
@@ -524,13 +504,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			return '';
 		}
 
-		const indent = '  '.repeat(indentLevel); // 2 spaces per indent level
+		const indent = '  '.repeat(indentLevel);
 		let itemText = '';
 		let hasNestedLists = false;
 
 		for (const child of listItem.content) {
 			if (child.type === 'paragraph') {
-				// Process paragraph content for the main bullet text
 				const paraText = (child.content || []).map(node => {
 					if (node.type === 'text') {
 						return node.text || '';
@@ -541,7 +520,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					itemText += paraText;
 				}
 			} else if (child.type === 'bulletList') {
-				// Handle nested bullet lists
 				hasNestedLists = true;
 				const nestedItems = [];
 				for (const nestedItem of child.content || []) {
@@ -562,10 +540,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			return '';
 		}
 
-		// Format the main bullet point
 		const mainBullet = indent + '- ' + itemText.split('\n')[0];
 		
-		// If there are nested items, append them
 		if (hasNestedLists) {
 			const lines = itemText.split('\n');
 			if (lines.length > 1) {
@@ -600,8 +576,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	generateNoteTitle(doc) {
 		const title = doc.title || 'Untitled Granola Note';
-		// Clean the title for use as a heading - remove invalid characters but keep spaces
-		return title.replace(/[<>:"/\\|?*]/g, '').trim();
+		// Don't strip characters - use the full title as-is
+		return title.trim();
 	}
 
 	generateFilename(doc) {
@@ -643,767 +619,25 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 		const invalidChars = /[<>:"/\\|?*]/g;
 		filename = filename.replace(invalidChars, '');
-		filename = filename.replace(/\s+/g, this.settings.filenameSeparator);
+		filename = filename.replace(/\s+/g, '_');
 
 		return filename;
 	}
 
-	generateDateBasedPath(doc) {
-		if (!this.settings.enableDateBasedFolders || !doc.created_at) {
-			return this.settings.syncDirectory;
-		}
-
-		const dateFolder = this.formatDate(doc.created_at, this.settings.dateFolderFormat);
-		return path.join(this.settings.syncDirectory, dateFolder);
-	}
-
-	generateFolderBasedPath(doc) {
-		if (!this.settings.enableGranolaFolders || !this.documentToFolderMap) {
-			return this.settings.syncDirectory;
-		}
-
-		const folder = this.documentToFolderMap[doc.id];
-		if (!folder || !folder.title) {
-			return this.settings.syncDirectory;
-		}
-
-		// Clean folder name for filesystem use
-		const cleanFolderName = folder.title
-			.replace(/[<>:"/\\|?*]/g, '') // Remove invalid filesystem characters
-			.replace(/\s+/g, this.settings.filenameSeparator) // Replace spaces with configured separator
-			.trim();
-
-		return path.join(this.settings.syncDirectory, cleanFolderName);
-	}
-
-	async ensureDateBasedDirectoryExists(datePath) {
-		try {
-			const folder = this.app.vault.getFolderByPath(datePath);
-			if (!folder) {
-				await this.app.vault.createFolder(datePath);
-			}
-		} catch (error) {
-			console.error('Error creating date-based directory:', datePath, error);
-		}
-	}
-
-	async ensureFolderBasedDirectoryExists(folderPath) {
-		try {
-			const folder = this.app.vault.getFolderByPath(folderPath);
-			if (!folder) {
-				await this.app.vault.createFolder(folderPath);
-			}
-		} catch (error) {
-			console.error('Error creating folder-based directory:', folderPath, error);
-		}
-	}
-
-	/**
-	 * Finds an existing note by its Granola ID based on the configured search scope.
-	 * 
-	 * Search scope options:
-	 * - 'syncDirectory' (default): Only searches within the configured sync directory
-	 * - 'entireVault': Searches all markdown files in the vault
-	 * - 'specificFolders': Searches within user-specified folders (including subfolders)
-	 * 
-	 * This allows users to move their Granola notes to different folders while still
-	 * avoiding duplicates when "Skip Existing Notes" is enabled.
-	 * 
-	 * @param {string} granolaId - The Granola ID to search for
-	 * @returns {TFile|null} The found file or null if not found
-	 */
-		async findExistingNoteByGranolaId(granolaId) {
-		let filesToSearch = [];
-
-		if (this.settings.existingNoteSearchScope === 'entireVault') {
-			// Search all markdown files in the vault
-			filesToSearch = this.app.vault.getMarkdownFiles();
-		} else if (this.settings.existingNoteSearchScope === 'specificFolders') {
-			// Search in specific folders
-			if (this.settings.specificSearchFolders.length === 0) {
-			return null;
-		}
-
-			for (const folderPath of this.settings.specificSearchFolders) {
-				const folder = this.app.vault.getFolderByPath(folderPath);
-				if (folder) {
-					const folderFiles = this.getAllMarkdownFilesInFolder(folder);
-					filesToSearch = filesToSearch.concat(folderFiles);
-				}
-			}
-		} else {
-			// Default: search only in sync directory
-			const folder = this.app.vault.getFolderByPath(this.settings.syncDirectory);
-			if (!folder) {
-				return null;
-			}
-			filesToSearch = folder.children.filter(file => file instanceof obsidian.TFile && file.extension === 'md');
-		}
-		
-		for (const file of filesToSearch) {
-			try {
-				const content = await this.app.vault.read(file);
-				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
-				
-				if (frontmatterMatch) {
-					const frontmatter = frontmatterMatch[1];
-					const granolaIdMatch = frontmatter.match(/granola_id:\s*(.+)$/m);
-					
-					if (granolaIdMatch && granolaIdMatch[1].trim() === granolaId) {
-						return file;
-					}
-				}
-			} catch (error) {
-				console.error('Error reading file for Granola ID check:', file.path, error);
-			}
-		}
-		
-		return null;
-	}
-
-	getAllMarkdownFilesInFolder(folder) {
-		const files = [];
-		
-		// Safety check - ensure folder exists
-		if (!folder) {
-			return files;
-		}
-		
-		// Use Vault.recurseChildren to get all markdown files in folder and subfolders
-		this.app.vault.recurseChildren(folder, (file) => {
-			if (file instanceof obsidian.TFile && file.extension === 'md') {
-				files.push(file);
-			}
-		});
-		
-		return files;
-	}
-
-	/**
-	 * Gets all folder paths in the vault (useful for future UI improvements)
-	 * @returns {string[]} Array of folder paths
-	 */
-	getAllFolderPaths() {
-		const allFolders = this.app.vault.getAllFolders();
-		return allFolders.map(folder => folder.path).sort();
-	}
-
-	async findDuplicateNotes(suppressNotice = false) {
-		try {
-			// Get all markdown files in the vault
-			const allFiles = this.app.vault.getMarkdownFiles();
-			const granolaFiles = {};
-			const duplicates = [];
-
-			// Check each file for granola-id
-			for (const file of allFiles) {
-				try {
-					const content = await this.app.vault.read(file);
-					const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
-
-					if (frontmatterMatch) {
-						const frontmatter = frontmatterMatch[1];
-						const granolaIdMatch = frontmatter.match(/granola_id:\s*(.+)$/m);
-
-						if (granolaIdMatch) {
-							const granolaId = granolaIdMatch[1].trim();
-
-							if (granolaFiles[granolaId]) {
-								// Found a duplicate
-								if (!duplicates.some(d => d.granolaId === granolaId)) {
-									duplicates.push({
-										granolaId: granolaId,
-										files: [granolaFiles[granolaId], file]
-									});
-								} else {
-									// Add to existing duplicate group
-									const duplicate = duplicates.find(d => d.granolaId === granolaId);
-									duplicate.files.push(file);
-								}
-							} else {
-								granolaFiles[granolaId] = file;
-							}
-						}
-					}
-				} catch (error) {
-					console.error('Error reading file:', file.path, error);
-				}
-			}
-
-			// Only show notices if not suppressed
-			if (!suppressNotice) {
-				if (duplicates.length === 0) {
-					new obsidian.Notice('No duplicate Granola notes found! 🎉');
-				} else {
-					// Create a summary message
-					let message = `Found ${duplicates.length} set(s) of duplicate Granola notes:\n\n`;
-
-					for (const duplicate of duplicates) {
-						message += `Granola ID: ${duplicate.granolaId}\n`;
-						for (const file of duplicate.files) {
-							message += `  • ${file.path}\n`;
-						}
-						message += '\n';
-					}
-
-					message += 'Check the console for full details. You can manually delete the duplicates you don\'t want to keep.';
-
-					new obsidian.Notice(message, 10000); // Show for 10 seconds
-				}
-			}
-
-			return duplicates;
-
-		} catch (error) {
-			console.error('Error finding duplicate notes:', error);
-			if (!suppressNotice) {
-				new obsidian.Notice('Error finding duplicate notes. Check console for details.');
-			}
-			return [];
-		}
-	}
-
-	generateDuplicatesReport(duplicates) {
-		let report = '---\n';
-		report += 'title: "Granola Duplicates Report"\n';
-		report += 'date: ' + new Date().toISOString() + '\n';
-		report += '---\n\n';
-		report += '# Duplicate Granola Notes\n\n';
-		report += `Found ${duplicates.length} set(s) of duplicate notes.\n\n`;
-
-		for (let i = 0; i < duplicates.length; i++) {
-			const duplicate = duplicates[i];
-			report += `## Duplicate Set ${i + 1}: ${duplicate.granolaId}\n\n`;
-			report += '| Filename | Link |\n';
-			report += '|----------|------|\n';
-
-			for (const file of duplicate.files) {
-				const fileName = file.path;
-				const baseName = fileName.split('/').pop();
-				report += `| ${baseName} | [[${fileName}]] |\n`;
-			}
-
-			report += '\n';
-		}
-
-		report += '## Instructions\n\n';
-		report += '1. **Review**: Click the links above to open and compare each duplicate\n';
-		report += '2. **Decide**: Choose which version you want to keep\n';
-		report += '3. **Delete**: Use your file explorer to delete the files you don\'t need\n';
-		report += '4. **Cleanup**: Delete this report when done\n\n';
-		report += '> **Note**: All listed files have the same Granola ID but are stored as separate files in your vault.\n';
-
-		return report;
-	}
-
-	async createOrUpdateDuplicatesFile(duplicates) {
-		try {
-			const report = this.generateDuplicatesReport(duplicates);
-			const duplicatesPath = 'Granola/Duplicates Report.md';
-
-			// Ensure Granola folder exists
-			let folder = this.app.vault.getFolderByPath('Granola');
-			if (!folder) {
-				try {
-					folder = await this.app.vault.createFolder('Granola');
-				} catch (error) {
-					// Folder might already exist or error creating, try to get it
-					folder = this.app.vault.getFolderByPath('Granola');
-				}
-			}
-
-			// Check if file exists
-			let reportFile = this.app.vault.getAbstractFileByPath(duplicatesPath);
-
-			if (reportFile && reportFile instanceof obsidian.TFile) {
-				// File exists, modify it with new content
-				await this.app.vault.modify(reportFile, report);
-			} else {
-				// File doesn't exist, try to create it
-				try {
-					reportFile = await this.app.vault.create(duplicatesPath, report);
-				} catch (createError) {
-					// File might have been created between the check and create, try to modify it
-					if (createError.message && createError.message.includes('already exists')) {
-						const existingFile = this.app.vault.getAbstractFileByPath(duplicatesPath);
-						if (existingFile && existingFile instanceof obsidian.TFile) {
-							await this.app.vault.modify(existingFile, report);
-							reportFile = existingFile;
-						} else {
-							throw createError;
-						}
-					} else {
-						throw createError;
-					}
-				}
-			}
-
-			// Open the report file
-			if (reportFile instanceof obsidian.TFile) {
-				await this.app.workspace.getLeaf().openFile(reportFile);
-			}
-
-			new obsidian.Notice('Duplicates report created and opened');
-
-		} catch (error) {
-			console.error('Error creating duplicates report:', error);
-			new obsidian.Notice('Error creating duplicates report. Check console for details.');
-		}
-	}
-
-	async findDuplicatesAndOpen() {
-		try {
-			// Find duplicates without showing popup notice
-			const duplicates = await this.findDuplicateNotes(true);
-
-			if (duplicates.length === 0) {
-				new obsidian.Notice('No duplicate Granola notes found! 🎉');
-				return;
-			}
-
-			// Create and open duplicates report file
-			await this.createOrUpdateDuplicatesFile(duplicates);
-
-		} catch (error) {
-			console.error('Error processing duplicates:', error);
-			new obsidian.Notice('Error processing duplicates. Check console for details.');
-		}
-	}
-
-	async processDocument(doc) {
-	try {
-		const title = doc.title || 'Untitled Granola Note';
-		const docId = doc.id || 'unknown_id';
-		const transcript = doc.transcript || 'no_transcript';
-
-		let contentToParse = null;
-		if (doc.last_viewed_panel && doc.last_viewed_panel.content && doc.last_viewed_panel.content.type === 'doc') {
-			contentToParse = doc.last_viewed_panel.content;
-		}
-
-		if (!contentToParse) {
-			return false;
-		}
-
-		// Check if note already exists by Granola ID
-		const existingFile = await this.findExistingNoteByGranolaId(docId);
-		
-		if (existingFile) {
-			if (this.settings.skipExistingNotes && !this.settings.includeAttendeeTags && !this.settings.includeGranolaUrl) {
-				return true; // Return true so it counts as "synced" but we don't update
-			}
-			
-			if (this.settings.skipExistingNotes && (this.settings.includeAttendeeTags || this.settings.includeGranolaUrl)) {
-				// Only update metadata (tags, URLs), preserve existing content
-				try {
-					await this.updateExistingNoteMetadata(existingFile, doc);
-					return true;
-				} catch (error) {
-					console.error('Error updating metadata for existing note:', error);
-					return false;
-				}
-			}
-
-			// Update existing note (full update)
-			try {
-				const markdownContent = this.convertProseMirrorToMarkdown(contentToParse);
-
-				// Extract attendee information
-				const attendeeNames = this.extractAttendeeNames(doc);
-				const attendeeTags = this.generateAttendeeTags(attendeeNames);
-				
-				// Extract folder information
-				const folderNames = this.extractFolderNames(doc);
-				const folderTags = this.generateFolderTags(folderNames);
-				
-				// Generate Granola URL
-				const granolaUrl = this.generateGranolaUrl(docId);
-				
-
-				// Combine all tags
-				const allTags = [...attendeeTags, ...folderTags];
-
-				// Create frontmatter with original title
-				let frontmatter = '---\n';
-				frontmatter += 'granola_id: ' + docId + '\n';
-				const escapedTitle = title.replace(/"/g, '\\"');
-				frontmatter += 'title: "' + escapedTitle + '"\n';
-				
-				if (granolaUrl) {
-					frontmatter += 'granola_url: "' + granolaUrl + '"\n';
-				}
-				
-				if (doc.created_at) {
-					frontmatter += 'created_at: ' + doc.created_at + '\n';
-				}
-				if (doc.updated_at) {
-					frontmatter += 'updated_at: ' + doc.updated_at + '\n';
-				}
-				
-				// Add all tags if any were found
-				if (allTags.length > 0) {
-					frontmatter += 'tags:\n';
-					for (const tag of allTags) {
-						frontmatter += '  - ' + tag + '\n';
-					}
-				}
-				
-				frontmatter += '---\n\n';
-
-				// Use the note title (clean, with proper spacing) for the heading
-				const noteTitle = this.generateNoteTitle(doc);
-				let finalMarkdown = frontmatter + '# ' + noteTitle + '\n\n' + markdownContent;
-				// Add transcript section if enabled and transcript is available
-				if (this.settings.includeFullTranscript) {
-					finalMarkdown += '\n\n# Transcript\n\n' + transcript;
-				}
-				
-				await this.app.vault.process(existingFile, () => finalMarkdown);
-				return true;
-			} catch (updateError) {
-				console.error('Error updating existing note:', updateError);
-				return false;
-			}
-		}
-
-		// Create new note
-		const markdownContent = this.convertProseMirrorToMarkdown(contentToParse);
-		
-		// Extract attendee information
-		const attendeeNames = this.extractAttendeeNames(doc);
-		const attendeeTags = this.generateAttendeeTags(attendeeNames);
-		
-		// Extract folder information
-		const folderNames = this.extractFolderNames(doc);
-		const folderTags = this.generateFolderTags(folderNames);
-		
-		// Generate Granola URL
-		const granolaUrl = this.generateGranolaUrl(docId);
-		
-
-		// Combine all tags
-		const allTags = [...attendeeTags, ...folderTags];
-
-		let frontmatter = '---\n';
-		frontmatter += 'granola_id: ' + docId + '\n';
-		const escapedTitle = title.replace(/"/g, '\\"');
-		frontmatter += 'title: "' + escapedTitle + '"\n';
-		
-		if (granolaUrl) {
-			frontmatter += 'granola_url: "' + granolaUrl + '"\n';
-		}
-		
-		if (doc.created_at) {
-			frontmatter += 'created_at: ' + doc.created_at + '\n';
-		}
-		if (doc.updated_at) {
-			frontmatter += 'updated_at: ' + doc.updated_at + '\n';
-		}
-		
-		// Add all tags if any were found
-		if (allTags.length > 0) {
-			frontmatter += 'tags:\n';
-			for (const tag of allTags) {
-				frontmatter += '  - ' + tag + '\n';
-			}
-		}
-		
-		frontmatter += '---\n\n';
-
-		let finalMarkdown = frontmatter + markdownContent;
-		// Add transcript section if enabled and transcript is available
-		if (this.settings.includeFullTranscript) {
-			finalMarkdown += '\n\n# Transcript\n\n' + transcript;
-		}
-
-		const filename = this.generateFilename(doc) + '.md';
-		// Use folder-based path if enabled, otherwise date-based, otherwise sync directory
-		let targetDirectory;
-		if (this.settings.enableGranolaFolders) {
-			targetDirectory = this.generateFolderBasedPath(doc);
-			await this.ensureFolderBasedDirectoryExists(targetDirectory);
-		} else {
-			targetDirectory = this.generateDateBasedPath(doc);
-			await this.ensureDateBasedDirectoryExists(targetDirectory);
-		}
-		const filepath = path.join(targetDirectory, filename);
-
-		// Check if file with same name already exists
-		let finalFilepath = filepath;
-		const existingFileByName = this.app.vault.getAbstractFileByPath(filepath);
-		if (existingFileByName) {
-			// Handle existing file based on user's preference
-			if (this.settings.existingFileAction === 'skip') {
-				// Skip creating a new file if one with the same name exists
-				return false;
-			} else if (this.settings.existingFileAction === 'timestamp') {
-				// Create a unique filename by appending timestamp
-				const timestamp = this.formatDate(doc.created_at, 'HH-mm');
-				const baseFilename = this.generateFilename(doc);
-				const uniqueFilename = baseFilename + '_' + timestamp + '.md';
-				finalFilepath = path.join(targetDirectory, uniqueFilename);
-
-				// Check if the unique filename also exists
-				const existingUniqueFile = this.app.vault.getAbstractFileByPath(finalFilepath);
-				if (existingUniqueFile) {
-					return false;
-				}
-			}
-		}
-
-		await this.app.vault.create(finalFilepath, finalMarkdown);
-		return true;
-
-	} catch (error) {
-		console.error('Error processing document:', error);
-		return false;
-	}
-}
-
-	async ensureDirectoryExists() {
-		try {
-			const folder = this.app.vault.getFolderByPath(this.settings.syncDirectory);
-			if (!folder) {
-				await this.app.vault.createFolder(this.settings.syncDirectory);
-			}
-		} catch (error) {
-			console.error('Error creating directory:', error);
-		}
-	}
-
-	async updateDailyNote(todaysNotes) {
-		try {
-			const dailyNote = await this.getDailyNote();
-			if (!dailyNote) {
-				return;
-			}
-
-			let content = await this.app.vault.read(dailyNote);
-			const sectionHeader = this.settings.dailyNoteSectionName;
-			
-			const notesList = todaysNotes
-				.sort((a, b) => a.time.localeCompare(b.time))
-				.map(note => '- ' + note.time + ' [[' + note.actualFilePath + '|' + note.title + ']]')
-				.join('\n');
-			
-			const granolaSection = sectionHeader + '\n' + notesList;
-
-			// Use MetadataCache to find existing headings
-			const fileCache = this.app.metadataCache.getFileCache(dailyNote);
-			const headings = fileCache?.headings || [];
-			
-			// Look for existing section by heading text
-			const existingHeading = headings.find(heading => 
-				heading.heading.trim() === sectionHeader.replace(/^#+\s*/, '').trim()
-			);
-			
-			if (existingHeading) {
-				// Found existing section, replace content
-				const lines = content.split('\n');
-				const sectionLineNum = existingHeading.position.start.line;
-				
-				// Find the end of this section (next heading of same or higher level, or end of file)
-				let endLineNum = lines.length;
-				for (const heading of headings) {
-					if (heading.position.start.line > sectionLineNum && heading.level <= existingHeading.level) {
-						endLineNum = heading.position.start.line;
-						break;
-					}
-				}
-				
-				const beforeSection = lines.slice(0, sectionLineNum).join('\n');
-				const afterSection = lines.slice(endLineNum).join('\n');
-				content = beforeSection + '\n' + granolaSection + '\n' + afterSection;
-			} else {
-				// Section not found, append to end
-				content += '\n\n' + granolaSection;
-			}
-
-			await this.app.vault.process(dailyNote, () => content);
-			
-		} catch (error) {
-			console.error('Error updating daily note:', error);
-		}
-	}
-
-	async updatePeriodicNote(todaysNotes) {
-		try {
-			const periodicNote = await this.getPeriodicNote();
-			if (!periodicNote) {
-				return;
-			}
-
-			let content = await this.app.vault.read(periodicNote);
-			const sectionHeader = this.settings.periodicNoteSectionName;
-			
-			const notesList = todaysNotes
-				.sort((a, b) => a.time.localeCompare(b.time))
-				.map(note => '- ' + note.time + ' [[' + note.actualFilePath + '|' + note.title + ']]')
-				.join('\n');
-			
-			const granolaSection = sectionHeader + '\n' + notesList;
-
-			// Use MetadataCache to find existing headings
-			const fileCache = this.app.metadataCache.getFileCache(periodicNote);
-			const headings = fileCache?.headings || [];
-			
-			// Look for existing section by heading text
-			const existingHeading = headings.find(heading => 
-				heading.heading.trim() === sectionHeader.replace(/^#+\s*/, '').trim()
-			);
-			
-			if (existingHeading) {
-				// Found existing section, replace content
-				const lines = content.split('\n');
-				const sectionLineNum = existingHeading.position.start.line;
-				
-				// Find the end of this section (next heading of same or higher level, or end of file)
-				let endLineNum = lines.length;
-				for (const heading of headings) {
-					if (heading.position.start.line > sectionLineNum && heading.level <= existingHeading.level) {
-						endLineNum = heading.position.start.line;
-						break;
-					}
-				}
-				
-				const beforeSection = lines.slice(0, sectionLineNum).join('\n');
-				const afterSection = lines.slice(endLineNum).join('\n');
-				content = beforeSection + '\n' + granolaSection + '\n' + afterSection;
-			} else {
-				// Section not found, append to end
-				content += '\n\n' + granolaSection;
-			}
-
-			await this.app.vault.process(periodicNote, () => content);
-			
-		} catch (error) {
-			console.error('Error updating periodic note:', error);
-		}
-	}
-
-	async getDailyNote() {
-		try {
-			// Try to get today's daily note using a simpler approach
-			const today = new Date();
-			const todayFormatted = today.toISOString().split('T')[0]; // YYYY-MM-DD format
-			
-			// Generate various date formats to search for
-			const year = today.getFullYear();
-			const month = String(today.getMonth() + 1).padStart(2, '0');
-			const day = String(today.getDate()).padStart(2, '0');
-			
-			// Common date formats in daily notes
-			const searchFormats = [
-				`${day}-${month}-${year}`, // DD-MM-YYYY
-				`${year}-${month}-${day}`, // YYYY-MM-DD  
-				`${month}-${day}-${year}`, // MM-DD-YYYY
-				`${day}.${month}.${year}`, // DD.MM.YYYY
-				`${year}/${month}/${day}`, // YYYY/MM/DD
-				`${day}/${month}/${year}`, // DD/MM/YYYY
-			];
-			
-			// Search through all files in the vault to find today's daily note
-			const files = this.app.vault.getMarkdownFiles();
-			
-			for (const file of files) {
-				// Check if this file is in the daily notes structure and matches any of today's date formats
-				if (file.path.includes('Daily')) {
-					for (const dateFormat of searchFormats) {
-						if (file.path.includes(dateFormat)) {
-							return file;
-						}
-					}
-				}
-			}
-			
-			return null;
-		} catch (error) {
-			console.error('Error getting daily note:', error);
-			return null;
-		}
-	}
-
-	isPeriodicNotesPluginAvailable() {
-		return this.app.plugins.enabledPlugins.has('periodic-notes');
-	}
-
-	async getPeriodicNote() {
-		try {
-			if (!this.isPeriodicNotesPluginAvailable()) {
-				return null;
-			}
-
-			// Since the Periodic Notes API is not accessible, let's try a different approach
-			// Let's try to find the daily note directly by looking for it in the vault
-			
-			// Get today's date
-			const today = new Date();
-			const todayFormatted = today.toISOString().split('T')[0]; // YYYY-MM-DD format
-			
-			// Search for today's daily note in the vault
-			const files = this.app.vault.getMarkdownFiles();
-			
-			// Look for files that might be today's daily note
-			// Priority order: exact date match, then files in Daily Notes folder, then any file with today's date
-			const possibleDailyNotes = files.filter(file => {
-				// First priority: exact date match in filename
-				if (file.name === todayFormatted + '.md' || file.name === todayFormatted) {
-					return true;
-				}
-				// Second priority: files in Daily Notes folder with today's date
-				if (file.path.includes('Daily') && (file.name.includes(todayFormatted) || file.path.includes(todayFormatted))) {
-					return true;
-				}
-				// Third priority: any file with today's date
-				return file.name.includes(todayFormatted) || 
-					   file.path.includes(todayFormatted) ||
-					   file.name.includes(today.toDateString().split(' ')[2]) || // Day of month
-					   file.name.includes(today.getDate().toString());
-			});
-			
-			// Sort by priority: exact date match first, then Daily Notes folder, then others
-			possibleDailyNotes.sort((a, b) => {
-				// Exact date match gets highest priority
-				if (a.name === todayFormatted + '.md' || a.name === todayFormatted) return -1;
-				if (b.name === todayFormatted + '.md' || b.name === todayFormatted) return 1;
-				
-				// Daily Notes folder gets second priority
-				if (a.path.includes('Daily') && !b.path.includes('Daily')) return -1;
-				if (b.path.includes('Daily') && !a.path.includes('Daily')) return 1;
-				
-				// Otherwise maintain original order
-				return 0;
-			});
-			
-			// Return the first match
-			if (possibleDailyNotes.length > 0) {
-				return possibleDailyNotes[0];
-			}
-			
-			return null;
-		} catch (error) {
-			console.error('Error getting periodic note:', error);
-			return null;
-		}
-	}
-
 	extractAttendeeNames(doc) {
 		const attendees = [];
-		const processedEmails = new Set(); // Track processed emails to avoid duplicates
+		const processedEmails = new Set();
 		
 		try {
-			// Check the people field for attendee information (enhanced with detailed person data)
 			if (doc.people && Array.isArray(doc.people)) {
 				for (const person of doc.people) {
 					let name = null;
 					
-					// Try to get name from various fields
 					if (person.name) {
 						name = person.name;
 					} else if (person.display_name) {
 						name = person.display_name;
 					} else if (person.details && person.details.person && person.details.person.name) {
-						// Use the detailed person information if available
 						const personDetails = person.details.person.name;
 						if (personDetails.fullName) {
 							name = personDetails.fullName;
@@ -1413,7 +647,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 							name = personDetails.givenName;
 						}
 					} else if (person.email) {
-						// Extract name from email if no display name
 						const emailName = person.email.split('@')[0].replace(/[._]/g, ' ');
 						name = emailName;
 					}
@@ -1427,10 +660,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				}
 			}
 			
-			// Also check google_calendar_event for additional attendee info
 			if (doc.google_calendar_event && doc.google_calendar_event.attendees) {
 				for (const attendee of doc.google_calendar_event.attendees) {
-					// Skip if we've already processed this email
 					if (attendee.email && processedEmails.has(attendee.email)) {
 						continue;
 					}
@@ -1463,24 +694,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const tags = [];
 		
 		for (const attendee of attendees) {
-			// Skip if this is the user's own name (case-insensitive, exact match)
 			if (this.settings.excludeMyNameFromTags && this.settings.myName && 
 				attendee.toLowerCase().trim() === this.settings.myName.toLowerCase().trim()) {
 				continue;
 			}
 			
-			// Convert name to valid tag format
-			// Remove special characters, replace spaces with hyphens, convert to lowercase
 			let cleanName = attendee
-				.replace(/[^\w\s-]/g, '') // Remove special chars except spaces and hyphens
+				.replace(/[^\w\s-]/g, '')
 				.trim()
-				.replace(/\s+/g, '-') // Replace spaces with hyphens
+				.replace(/\s+/g, '-')
 				.toLowerCase();
 			
-			// Use the customizable tag template
 			let tag = this.settings.attendeeTagTemplate.replace('{name}', cleanName);
-			
-			// Ensure the tag is valid (no double slashes, etc.)
 			tag = tag.replace(/\/+/g, '/').replace(/^\/|\/$/g, '');
 			
 			if (tag && !tags.includes(tag)) {
@@ -1495,8 +720,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const folderNames = [];
 		
 		try {
-			// Check if folder support is enabled and we have folder mapping
-			if (this.settings.enableGranolaFolders && this.documentToFolderMap) {
+			if (this.settings.includeFolderTags && this.documentToFolderMap) {
 				const folder = this.documentToFolderMap[doc.id];
 				if (folder && folder.title) {
 					folderNames.push(folder.title);
@@ -1507,37 +731,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		} catch (error) {
 			console.error('Error extracting folder names:', error);
 			return [];
-		}
-	}
-
-	findWorkspaceName(workspaceId) {
-		if (!this.workspaces || !workspaceId) {
-			return null;
-		}
-		
-		try {
-			// Try different possible structures for workspaces response
-			if (Array.isArray(this.workspaces)) {
-				const workspace = this.workspaces.find(ws => ws.id === workspaceId);
-				if (workspace && workspace.name) {
-					return workspace.name;
-				}
-			} else if (this.workspaces.workspaces && Array.isArray(this.workspaces.workspaces)) {
-				const workspace = this.workspaces.workspaces.find(ws => ws.id === workspaceId);
-				if (workspace && workspace.name) {
-					return workspace.name;
-				}
-			} else if (this.workspaces.lists && Array.isArray(this.workspaces.lists)) {
-				const list = this.workspaces.lists.find(l => l.id === workspaceId);
-				if (list && list.name) {
-					return list.name;
-				}
-			}
-			
-			return null;
-		} catch (error) {
-			console.error('Error finding workspace name:', error);
-			return null;
 		}
 	}
 
@@ -1552,18 +745,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			for (const folderName of folderNames) {
 				if (!folderName) continue;
 				
-				// Convert folder name to valid tag format
-				// Remove special characters, replace spaces with hyphens, convert to lowercase
 				let cleanName = folderName
-					.replace(/[^\w\s-]/g, '') // Remove special chars except spaces and hyphens
+					.replace(/[^\w\s-]/g, '')
 					.trim()
-					.replace(/\s+/g, '-') // Replace spaces with hyphens
+					.replace(/\s+/g, '-')
 					.toLowerCase();
 				
-				// Use the customizable tag template
 				let tag = this.settings.folderTagTemplate.replace('{name}', cleanName);
-				
-				// Ensure the tag is valid (no double slashes, etc.)
 				tag = tag.replace(/\/+/g, '/').replace(/^\/|\/$/g, '');
 				
 				if (tag && !tags.includes(tag)) {
@@ -1584,7 +772,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 		
 		try {
-			// Construct the Granola notes URL using the correct format
 			return `https://notes.granola.ai/d/${docId}`;
 		} catch (error) {
 			console.error('Error generating Granola URL:', error);
@@ -1592,565 +779,821 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
-	async updateExistingNoteMetadata(file, doc) {
+	convertMarkdownToAppleNotes(markdown) {
+		if (!markdown) return '';
+		
+		let formatted = markdown;
+		
+		// Convert markdown headings to plain text with spacing
+		formatted = formatted.replace(/^### (.*$)/gim, '\n$1\n'); // H3
+		formatted = formatted.replace(/^## (.*$)/gim, '\n$1\n'); // H2
+		formatted = formatted.replace(/^# (.*$)/gim, '\n$1\n'); // H1
+		
+		// Convert bold **text** to plain text
+		formatted = formatted.replace(/\*\*(.*?)\*\*/g, '$1');
+		
+		// Convert italic *text* to plain text
+		formatted = formatted.replace(/\*(.*?)\*/g, '$1');
+		
+		// Clean up any remaining markdown artifacts
+		formatted = formatted.replace(/```[\s\S]*?```/g, ''); // Remove code blocks
+		formatted = formatted.replace(/`([^`]+)`/g, '$1'); // Remove inline code
+		
+		// Preserve line breaks - ensure single newlines are preserved
+		// Apple Notes needs explicit newlines, so we'll keep them as-is
+		// Normalize multiple consecutive newlines to max 2
+		formatted = formatted.replace(/\n{3,}/g, '\n\n');
+		
+		return formatted;
+	}
+
+	// Create or update note in Apple Notes using AppleScript
+	async createOrUpdateAppleNote(doc, content) {
+		// Use the inline AppleScript method directly (more reliable than file-based approach)
+		return await this.createOrUpdateAppleNoteFallback(doc, content);
+	}
+
+	// Delete all notes in the Granola folder
+	async deleteAllNotesInFolder() {
 		try {
-			// Extract all metadata
+			const escapedAccount = this.settings.appleNotesAccount
+				.replace(/\\/g, '\\\\')
+				.replace(/"/g, '\\"');
+			
+			const escapedFolder = (this.settings.appleNotesFolder || '')
+				.replace(/\\/g, '\\\\')
+				.replace(/"/g, '\\"');
+
+			// Use a simpler, more direct approach
+			const script = `
+				tell application "Notes"
+					activate
+					set targetAccount to account "${escapedAccount}"
+					
+					-- Get target folder
+					if "${escapedFolder}" is not "" then
+						try
+							set targetFolder to folder "${escapedFolder}" of targetAccount
+						on error errMsg
+							return "ERROR: Folder not found"
+						end try
+					else
+						set targetFolder to targetAccount
+					end if
+					
+					-- Get initial count
+					set initialCount to count of notes of targetFolder
+					
+					-- Keep deleting until no notes remain
+					repeat
+						set allNotes to notes of targetFolder
+						set noteCount to count of allNotes
+						if noteCount is 0 then exit repeat
+						
+						-- Delete the first note (simpler than reverse iteration)
+						try
+							delete item 1 of allNotes
+						on error
+							-- If deletion fails, try next approach
+							exit repeat
+						end try
+					end repeat
+					
+					return initialCount
+				end tell
+			`;
+
+			console.log(`Executing delete script for folder "${this.settings.appleNotesFolder || 'root'}" in account "${this.settings.appleNotesAccount}"...`);
+			
+			// Write script to temp file to avoid escaping issues - use absolute path
+			const tempScriptFile = path.join(__dirname, '.temp-delete-script.applescript');
+			const absoluteScriptPath = path.resolve(tempScriptFile);
+			fs.writeFileSync(absoluteScriptPath, script, 'utf8');
+			
+			try {
+				// Use absolute path and ensure it's properly quoted
+				const result = execSync(`osascript "${absoluteScriptPath}"`, { 
+					encoding: 'utf8',
+					timeout: 30000,
+					stdio: 'pipe',
+					cwd: __dirname
+				});
+
+				const output = result.toString().trim();
+				console.log('Delete script output:', output);
+				
+				// Check if there was an error message
+				if (output.startsWith('ERROR:')) {
+					console.warn(output);
+					return 0;
+				}
+				
+				const deletedCount = parseInt(output) || 0;
+				if (deletedCount > 0) {
+					console.log(`✓ Successfully deleted ${deletedCount} existing notes from Granola folder`);
+				} else {
+					console.log(`✓ No notes found to delete in Granola folder (folder is empty)`);
+				}
+				return deletedCount;
+			} catch (error) {
+				console.error('Error executing delete script:', error.message);
+				// Try to read the script file to debug
+				if (fs.existsSync(absoluteScriptPath)) {
+					const scriptContent = fs.readFileSync(absoluteScriptPath, 'utf8');
+					console.error('Script content length:', scriptContent.length);
+				}
+				return 0;
+			} finally {
+				// Clean up temp script file
+				try {
+					if (fs.existsSync(absoluteScriptPath)) {
+						fs.unlinkSync(absoluteScriptPath);
+					}
+				} catch (e) {
+					// Ignore cleanup errors
+				}
+			}
+		} catch (error) {
+			console.error('Error deleting notes:', error.message);
+			console.error('Error details:', error);
+			return 0;
+		}
+	}
+
+	// Save markdown file for later bulk import
+	async saveMarkdownFile(doc, content) {
+		try {
+			const title = doc.title || 'Untitled Granola Note';
+			// Sanitize filename
+			const sanitizedTitle = title.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
+			const tempFile = path.join(__dirname, `.temp-${sanitizedTitle}-${doc.id}.md`);
+			// Normalize line endings and ensure proper formatting
+			const normalizedContent = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+			fs.writeFileSync(tempFile, normalizedContent, 'utf8');
+			return { file: tempFile, doc: doc };
+		} catch (error) {
+			console.error('Error saving markdown file:', error);
+			return null;
+		}
+	}
+
+	// Import all markdown files in bulk by creating notes directly
+	// This is more reliable than using the import dialog
+	async importMarkdownFilesBulk(markdownFiles) {
+		if (!markdownFiles || markdownFiles.length === 0) {
+			return 0;
+		}
+
+		try {
+			const escapedAccount = this.settings.appleNotesAccount
+				.replace(/\\/g, '\\\\')
+				.replace(/"/g, '\\"');
+			
+			const escapedFolder = (this.settings.appleNotesFolder || '')
+				.replace(/\\/g, '\\\\')
+				.replace(/"/g, '\\"');
+
+			let importedCount = 0;
+			
+			console.log(`Starting bulk import of ${markdownFiles.length} files...`);
+			
+			for (let i = 0; i < markdownFiles.length; i++) {
+				// Check if sync should be stopped
+				if (this.shouldStopSync) {
+					console.log('Sync stopped by user during import');
+					this.syncStatus.isRunning = false;
+					this.syncStatus.lastError = 'Sync stopped by user';
+					return importedCount;
+				}
+				
+				const mf = markdownFiles[i];
+				const filePath = mf.file.replace(/\\/g, '/');
+				const fileName = path.basename(filePath);
+				const doc = mf.doc;
+				const title = doc.title || 'Untitled Granola Note';
+				const escapedTitle = title.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+				const escapedGranolaId = doc.id.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+				
+				console.log(`Importing ${i + 1}/${markdownFiles.length}: ${fileName}`);
+				
+				try {
+					// Read the markdown file content
+					let content = fs.readFileSync(filePath, 'utf8');
+					
+					// Normalize line endings to ensure consistent newlines
+					content = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+					
+					// Create note directly using AppleScript - simpler and more reliable
+					const title = doc.title || 'Untitled Granola Note';
+					const escapedTitle = title.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+					
+					// Write content to temp file for AppleScript to read
+					const contentTempFile = path.join(__dirname, `.temp-content-${i}.txt`);
+					fs.writeFileSync(contentTempFile, content, 'utf8');
+					const contentTempFilePath = contentTempFile.replace(/\\/g, '/');
+					
+					const script = `
+						-- Read content and convert newlines properly
+						set contentFile to POSIX file "${contentTempFilePath}"
+						set rawContent to read file contentFile as «class utf8»
+						
+						-- Convert Unix newlines (\\n) to AppleScript return characters
+						set AppleScript's text item delimiters to ASCII character 10
+						set contentLines to text items of rawContent
+						set AppleScript's text item delimiters to return
+						set noteContent to contentLines as string
+						set AppleScript's text item delimiters to ""
+						
+						tell application "Notes"
+							activate
+							set targetAccount to account "${escapedAccount}"
+							
+							if "${escapedFolder}" is not "" then
+								try
+									set targetFolder to folder "${escapedFolder}" of targetAccount
+								on error
+									set targetFolder to make new folder at targetAccount with properties {name:"${escapedFolder}"}
+								end try
+							else
+								set targetFolder to targetAccount
+							end if
+							
+							-- Create note with name first, then set body
+							set newNote to make new note at targetFolder with properties {name:"${escapedTitle}"}
+							delay 0.1
+							set body of newNote to noteContent
+							delay 0.1
+							set name of newNote to "${escapedTitle}"
+						end tell
+					`;
+					
+					// Write script to temp file
+					const scriptFile = path.join(__dirname, `.temp-create-${i}.applescript`);
+					fs.writeFileSync(scriptFile, script, 'utf8');
+					
+					try {
+						execSync(`osascript "${scriptFile}"`, { 
+							encoding: 'utf8',
+							timeout: 15000,
+							stdio: 'pipe'
+						});
+						
+						importedCount++;
+						console.log(`  ✓ Successfully imported ${fileName}`);
+					} finally {
+						// Clean up temp files
+						try {
+							if (fs.existsSync(scriptFile)) fs.unlinkSync(scriptFile);
+							if (fs.existsSync(contentTempFile)) fs.unlinkSync(contentTempFile);
+						} catch (e) {
+							// Ignore cleanup errors
+						}
+					}
+				} catch (error) {
+					console.error(`  ✗ Error importing file ${fileName}:`, error.message);
+					// Continue with next file
+				}
+			}
+
+			// Clean up all temp files
+			for (const mf of markdownFiles) {
+				try {
+					if (fs.existsSync(mf.file)) {
+						fs.unlinkSync(mf.file);
+					}
+				} catch (cleanupError) {
+					console.warn('Could not delete temp file:', mf.file);
+				}
+			}
+
+			// Find imported notes and set their titles
+			await this.setImportedNoteTitles(markdownFiles);
+
+			return importedCount;
+		} catch (error) {
+			console.error('Error importing markdown files:', error);
+			// Clean up temp files on error
+			for (const mf of markdownFiles) {
+				try {
+					if (fs.existsSync(mf.file)) {
+						fs.unlinkSync(mf.file);
+					}
+				} catch (cleanupError) {
+					// Ignore cleanup errors
+				}
+			}
+			return 0;
+		}
+	}
+
+	// Set titles for imported notes
+	async setImportedNoteTitles(markdownFiles) {
+		try {
+			const escapedAccount = this.settings.appleNotesAccount
+				.replace(/\\/g, '\\\\')
+				.replace(/"/g, '\\"');
+			
+			const escapedFolder = (this.settings.appleNotesFolder || '')
+				.replace(/\\/g, '\\\\')
+				.replace(/"/g, '\\"');
+
+			// Build script to set titles for all imported notes
+			let titleUpdates = '';
+			for (const mf of markdownFiles) {
+				const doc = mf.doc;
+				const title = doc.title || 'Untitled Granola Note';
+				const escapedTitle = title.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+				const escapedGranolaId = doc.id.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+				
+				titleUpdates += `
+					-- Set title for note with granola_id: ${escapedGranolaId}
+					repeat with aNote in notes of targetFolder
+						try
+							set noteBody to body of aNote
+							if noteBody contains "granola_id: ${escapedGranolaId}" then
+								set name of aNote to "${escapedTitle}"
+								exit repeat
+							end if
+						end try
+					end repeat
+				`;
+			}
+
+			const script = `
+				tell application "Notes"
+					set targetAccount to account "${escapedAccount}"
+					
+					if "${escapedFolder}" is not "" then
+						try
+							set targetFolder to folder "${escapedFolder}" of targetAccount
+						on error
+							set targetFolder to targetAccount
+						end try
+					else
+						set targetFolder to targetAccount
+					end if
+					
+					${titleUpdates}
+				end tell
+			`;
+
+			execSync(`osascript -e '${script.replace(/'/g, "'\\''")}'`, { 
+				encoding: 'utf8',
+				timeout: 30000,
+				stdio: 'inherit'
+			});
+		} catch (error) {
+			console.error('Error setting imported note titles:', error);
+		}
+	}
+
+	// Method using Apple Notes' Import Markdown functionality (legacy - kept for reference)
+	async createOrUpdateAppleNoteFallback(doc, content) {
+		try {
+			// Save content as markdown file - use title as filename for better organization
+			const title = doc.title || 'Untitled Granola Note';
+			// Sanitize filename
+			const sanitizedTitle = title.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
+			const tempFile = path.join(__dirname, `.temp-${sanitizedTitle}-${doc.id}.md`);
+			// Normalize line endings and ensure proper formatting
+			const normalizedContent = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+			fs.writeFileSync(tempFile, normalizedContent, 'utf8');
+			const escapedTitle = title
+				.replace(/\\/g, '\\\\')
+				.replace(/"/g, '\\"');
+			
+			const escapedAccount = this.settings.appleNotesAccount
+				.replace(/\\/g, '\\\\')
+				.replace(/"/g, '\\"');
+			
+			const escapedFolder = (this.settings.appleNotesFolder || '')
+				.replace(/\\/g, '\\\\')
+				.replace(/"/g, '\\"');
+			
+			const escapedGranolaId = doc.id
+				.replace(/\\/g, '\\\\')
+				.replace(/"/g, '\\"');
+			
+			const tempFilePath = tempFile.replace(/\\/g, '/'); // Ensure forward slashes
+			
+			// Use Apple Notes' Import Markdown functionality via AppleScript
+			// This should preserve titles better since it uses Apple Notes' native import
+			const script = `
+				set markdownFile to POSIX file "${tempFilePath}"
+				
+				tell application "Notes"
+					activate
+					set targetAccount to account "${escapedAccount}"
+					
+					-- Ensure target folder exists
+					if "${escapedFolder}" is not "" then
+						try
+							set targetFolder to folder "${escapedFolder}" of targetAccount
+						on error
+							set targetFolder to make new folder at targetAccount with properties {name:"${escapedFolder}"}
+						end try
+					else
+						set targetFolder to targetAccount
+					end if
+					
+					-- Check if note already exists by granola_id
+					set existingNote to missing value
+					repeat with aNote in notes of targetFolder
+						try
+							set noteBody to body of aNote
+							if noteBody contains "granola_id: ${escapedGranolaId}" then
+								set existingNote to aNote
+								exit repeat
+							end if
+						end try
+					end repeat
+					
+					-- Delete existing note if found (we'll recreate via import)
+					if existingNote is not missing value then
+						delete existingNote
+					end if
+					
+					-- Use Apple Notes' Import Markdown functionality
+					-- Try using the 'open' command which should trigger import
+					-- First, switch to the target folder
+					set current view to targetFolder
+					delay 0.2
+					
+					-- Use System Events to trigger the import menu
+					tell application "System Events"
+						tell process "Notes"
+							set frontmost to true
+							delay 0.3
+							
+							-- Use keyboard shortcut for Import to Notes (Cmd+Shift+I)
+							keystroke "i" using {command down, shift down}
+							delay 1
+							
+							-- In the file picker dialog, use Go to Folder (Cmd+Shift+G)
+							keystroke "g" using {command down, shift down}
+							delay 0.5
+							
+							-- Type the directory path (parent directory of the file)
+							set fileDir to do shell script "dirname \"${tempFilePath}\""
+							keystroke fileDir
+							delay 0.3
+							keystroke return
+							delay 0.5
+							
+							-- Select the file (filename only)
+							set fileName to do shell script "basename \"${tempFilePath}\""
+							keystroke fileName
+							delay 0.3
+							keystroke return
+							delay 2
+						end tell
+					end tell
+					
+					-- Wait for import to complete
+					delay 1
+					
+					-- Find the newly imported note (should be the most recent one)
+					-- Check notes in reverse order (newest first)
+					set importedNote to missing value
+					set allNotes to notes of targetFolder
+					repeat with i from (count of allNotes) to 1 by -1
+						set aNote to item i of allNotes
+						try
+							set noteBody to body of aNote
+							if noteBody contains "granola_id: ${escapedGranolaId}" then
+								set importedNote to aNote
+								exit repeat
+							end if
+						end try
+					end repeat
+					
+					-- If we found the imported note, ensure the title is correct
+					if importedNote is not missing value then
+						set name of importedNote to "${escapedTitle}"
+					end if
+				end tell
+			`;
+			
+			execSync(`osascript -e '${script.replace(/'/g, "'\\''")}'`, { 
+				encoding: 'utf8',
+				timeout: 30000,
+				stdio: 'inherit' // Show output for debugging
+			});
+			
+			// Clean up temp markdown file after import
+			try {
+				if (fs.existsSync(tempFile)) {
+					fs.unlinkSync(tempFile);
+				}
+			} catch (cleanupError) {
+				// Ignore cleanup errors
+				console.warn('Could not delete temp file:', tempFile);
+			}
+			
+			return true;
+		} catch (error) {
+			console.error('AppleScript failed:', error.message);
+			// Clean up temp file on error
+			const tempFile = path.join(__dirname, '.temp-note-content.txt');
+			if (fs.existsSync(tempFile)) {
+				try {
+					fs.unlinkSync(tempFile);
+				} catch (e) {
+					// Ignore cleanup errors
+				}
+			}
+			return false;
+		}
+	}
+
+	async processDocument(doc) {
+		try {
+			const title = doc.title || 'Untitled Granola Note';
+			const docId = doc.id || 'unknown_id';
+			const transcript = doc.transcript || 'no_transcript';
+
+			let contentToParse = null;
+			if (doc.last_viewed_panel && doc.last_viewed_panel.content && doc.last_viewed_panel.content.type === 'doc') {
+				contentToParse = doc.last_viewed_panel.content;
+			}
+
+			if (!contentToParse) {
+				return false;
+			}
+
+			// Convert ProseMirror to Markdown
+			const markdownContent = this.convertProseMirrorToMarkdown(contentToParse);
+			
+			// Extract metadata
 			const attendeeNames = this.extractAttendeeNames(doc);
 			const attendeeTags = this.generateAttendeeTags(attendeeNames);
 			const folderNames = this.extractFolderNames(doc);
 			const folderTags = this.generateFolderTags(folderNames);
-			const granolaUrl = this.generateGranolaUrl(doc.id);
+			const granolaUrl = this.generateGranolaUrl(docId);
 			
-			// Use FileManager.processFrontMatter for atomic frontmatter updates
-			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-				// Preserve existing tags that are not person or folder tags
-				const existingTags = frontmatter.tags || [];
-				const preservedTags = existingTags.filter(tag => 
-					!tag.startsWith('person/') && !tag.startsWith('folder/')
-				);
-				
-				// Combine attendee and folder tags
-				const newTags = [...attendeeTags, ...folderTags];
-				
-				// Update tags
-				frontmatter.tags = [...preservedTags, ...newTags];
-				
-				// Update or add Granola URL if enabled
-				if (granolaUrl) {
-					frontmatter.granola_url = granolaUrl;
-				}
-			});
+			// Combine all tags
+			const allTags = [...attendeeTags, ...folderTags];
+
+			// Build note content - put actual content FIRST to prevent Apple Notes from using metadata as title
+			// Convert markdown to Apple Notes-friendly format
+			const formattedContent = this.convertMarkdownToAppleNotes(markdownContent);
 			
+			let noteContent = '';
+			
+			// Put the EXACT title as the first line, then two newlines, then body
+			// This structure: Title\n\nBody ensures title is clearly separated
+			const exactTitle = title.trim(); // Ensure no extra whitespace
+			noteContent += exactTitle;
+			noteContent += '\n\n'; // Two newlines to separate title from body
+			
+			// Then add the actual content
+			if (formattedContent.trim().length > 0) {
+				noteContent += formattedContent.trim();
+			}
+			
+			// Add spacing before metadata if there's content
+			if (formattedContent.trim().length > 0) {
+				noteContent += '\n\n';
+			}
+			
+			// Add metadata at the bottom (after content)
+			noteContent += '\n\n--- Granola Note ---\n';
+			noteContent += `granola_id: ${docId}\n`;
+			noteContent += `title: "${title.replace(/"/g, '\\"')}"\n`;
+			
+			if (granolaUrl) {
+				noteContent += `granola_url: ${granolaUrl}\n`;
+			}
+			
+			if (doc.created_at) {
+				noteContent += `created_at: ${doc.created_at}\n`;
+			}
+			if (doc.updated_at) {
+				noteContent += `updated_at: ${doc.updated_at}\n`;
+			}
+			
+			if (allTags.length > 0) {
+				noteContent += `tags: ${allTags.join(', ')}\n`;
+			}
+			
+			noteContent += '---';
+			
+			// Add transcript section if enabled
+			if (this.settings.includeFullTranscript && transcript !== 'no_transcript') {
+				const formattedTranscript = this.convertMarkdownToAppleNotes(transcript);
+				noteContent += '\n\n---\n\nTRANSCRIPT\n\n' + formattedTranscript;
+			}
+
+			// Save markdown file instead of importing immediately
+			// We'll import all files in bulk later
+			const markdownFile = await this.saveMarkdownFile(doc, noteContent);
+			return markdownFile;
+
 		} catch (error) {
-			console.error('Error updating attendee tags for existing note:', error);
-			throw error;
+			console.error('Error processing document:', error);
+			return false;
 		}
 	}
-}
 
-class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
-	constructor(app, plugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display() {
-		const containerEl = this.containerEl;
-		containerEl.empty();
-
-		// Debug: Log all settings
-		console.log('All plugin settings:', this.plugin.settings);
-		console.log('enableGranolaFolders value:', this.plugin.settings.enableGranolaFolders);
-		console.log('enableGranolaFolders type:', typeof this.plugin.settings.enableGranolaFolders);
-
-		new obsidian.Setting(containerEl)
-			.setName('Note prefix')
-			.setDesc('Optional prefix to add to all synced note titles')
-			.addText(text => {
-				text.setPlaceholder('granola-');
-				text.setValue(this.plugin.settings.notePrefix);
-				text.onChange(async (value) => {
-					this.plugin.settings.notePrefix = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Auth key path')
-			.setDesc('Path to your Granola authentication key file')
-			.addText(text => {
-				text.setPlaceholder(getDefaultAuthPath());
-				text.setValue(this.plugin.settings.authKeyPath);
-				text.onChange(async (value) => {
-					this.plugin.settings.authKeyPath = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Date format')
-			.setDesc('Format for dates in filenames. Use YYYY (year), MM (month), DD (day)')
-			.addText(text => {
-				text.setPlaceholder('YYYY-MM-DD');
-				text.setValue(this.plugin.settings.dateFormat);
-				text.onChange(async (value) => {
-					this.plugin.settings.dateFormat = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-
-		new obsidian.Setting(containerEl)
-			.setName('Include full transcript')
-			.setDesc('Include the full meeting transcript in each note under a "# Transcript" section. This requires an additional API call per note and may slow down sync.')
-			.addToggle(toggle => {
-				toggle.setValue(this.plugin.settings.includeFullTranscript);
-				toggle.onChange(async (value) => {
-					this.plugin.settings.includeFullTranscript = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Filename template')
-			.setDesc('Template for filenames. Use {title}, {created_date}, {updated_date}, etc.')
-			.addText(text => {
-				text.setPlaceholder('{created_date}_{title}');
-				text.setValue(this.plugin.settings.filenameTemplate);
-				text.onChange(async (value) => {
-					this.plugin.settings.filenameTemplate = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Filename word separator')
-			.setDesc('Character to separate words in filenames (underscore, hyphen, space, or none)')
-			.addDropdown(dropdown => {
-				dropdown.addOption('_', 'Underscore (_) - Team_Standup');
-				dropdown.addOption('-', 'Hyphen (-) - Team-Standup');
-				dropdown.addOption(' ', 'Space ( ) - Team Standup');
-				dropdown.addOption('', 'None - TeamStandup');
-
-				dropdown.setValue(this.plugin.settings.filenameSeparator);
-				dropdown.onChange(async (value) => {
-					this.plugin.settings.filenameSeparator = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('When file already exists by name')
-			.setDesc('Choose what to do when syncing a note with a filename that already exists')
-			.addDropdown(dropdown => {
-				dropdown.addOption('timestamp', 'Create timestamped version (e.g., filename_13-40.md)');
-				dropdown.addOption('skip', 'Skip the file and don\'t create a new version');
-
-				dropdown.setValue(this.plugin.settings.existingFileAction);
-				dropdown.onChange(async (value) => {
-					this.plugin.settings.existingFileAction = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Auto-sync frequency')
-			.setDesc('How often to automatically sync notes')
-			.addDropdown(dropdown => {
-				dropdown.addOption('0', 'Never');
-				dropdown.addOption('60000', 'Every 1 minute');
-				dropdown.addOption('300000', 'Every 5 minutes');
-				dropdown.addOption('600000', 'Every 10 minutes');
-				dropdown.addOption('1800000', 'Every 30 minutes');
-				dropdown.addOption('3600000', 'Every 1 hour');
-				dropdown.addOption('21600000', 'Every 6 hours');
-				dropdown.addOption('86400000', 'Every 24 hours');
-				
-				dropdown.setValue(String(this.plugin.settings.autoSyncFrequency));
-				dropdown.onChange(async (value) => {
-					this.plugin.settings.autoSyncFrequency = parseInt(value);
-					await this.plugin.saveSettings();
-					
-					const label = this.plugin.getFrequencyLabel(parseInt(value));
-					new obsidian.Notice('Auto-sync updated: ' + label);
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Skip existing notes')
-			.setDesc('When enabled, notes that already exist will not be updated during sync. This preserves any manual tags, summaries, or other additions you\'ve made.')
-			.addToggle(toggle => {
-				toggle.setValue(this.plugin.settings.skipExistingNotes);
-				toggle.onChange(async (value) => {
-					this.plugin.settings.skipExistingNotes = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Enable date-based folders')
-			.setDesc('Organize notes into subfolders based on their creation date')
-			.addToggle(toggle => {
-				toggle.setValue(this.plugin.settings.enableDateBasedFolders);
-				toggle.onChange(async (value) => {
-					this.plugin.settings.enableDateBasedFolders = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Date folder format')
-			.setDesc('Format for date-based folder structure. Examples: "YYYY-MM-DD" or "YYYY/MM/DD" subfolders')
-			.addText(text => {
-				text.setPlaceholder('YYYY/MM/DD');
-				text.setValue(this.plugin.settings.dateFolderFormat);
-				text.onChange(async (value) => {
-					this.plugin.settings.dateFolderFormat = value || 'YYYY/MM/DD';
-					await this.plugin.saveSettings();
-				});
-			});
-
-		// Create experimental section header
-		containerEl.createEl('h4', {text: '🧪 Experimental features'});
+	async syncNotes() {
+		if (this.syncStatus.isRunning) {
+			console.log('Sync already in progress');
+			return;
+		}
 		
-		const experimentalWarning = containerEl.createEl('div', { cls: 'setting-item' });
-		experimentalWarning.createEl('div', { cls: 'setting-item-info' });
-		const warningNameEl = experimentalWarning.createEl('div', { cls: 'setting-item-name' });
-		warningNameEl.setText('⚠️ Please backup your vault');
-		const warningDescEl = experimentalWarning.createEl('div', { cls: 'setting-item-description' });
-		warningDescEl.setText('⚠️ The features below are experimental and may create duplicate notes if not used carefully. Please backup your vault before changing these settings.');
+		try {
+			this.syncStatus.isRunning = true;
+			this.shouldStopSync = false;
+			this.syncStatus.lastError = null;
+			console.log('Starting Granola sync...');
+			
+			const token = await this.loadCredentials();
+			if (!token) {
+				console.error('Failed to load credentials');
+				return;
+			}
 
-		new obsidian.Setting(containerEl)
-			.setName('Search scope for existing notes')
-			.setDesc('Choose where to search for existing notes when checking granola-id. "Sync directory only" (default) only checks the configured sync folder. "Entire vault" allows you to move notes anywhere in your vault. "Specific folders" lets you choose which folders to search.')
-			.addDropdown(dropdown => {
-				dropdown.addOption('syncDirectory', 'Sync directory only (default)');
-				dropdown.addOption('entireVault', 'Entire vault');
-				dropdown.addOption('specificFolders', 'Specific folders');
-				
-				dropdown.setValue(this.plugin.settings.existingNoteSearchScope);
-				dropdown.onChange(async (value) => {
-					const oldValue = this.plugin.settings.existingNoteSearchScope;
-					this.plugin.settings.existingNoteSearchScope = value;
-					
-					// Save settings without triggering auto-sync to prevent duplicates
-					await this.plugin.saveSettingsWithoutSync();
-					
-					// Show warning if search scope changed
-					if (oldValue !== value) {
-						new obsidian.Notice('Search scope changed. Consider running a manual sync to test the new settings before relying on auto-sync.');
-					}
-					
-					this.display(); // Refresh the settings display
-				});
-			});
+			const documents = await this.fetchAllGranolaDocuments(token);
+			if (!documents || documents.length === 0) {
+				console.error('Failed to fetch documents or no documents found');
+				this.syncStatus.isRunning = false;
+				this.syncStatus.lastError = 'No documents found';
+				this.syncStatus.lastSyncCount = 0;
+				return;
+			}
 
-		// Show folder selection only when 'specificFolders' is selected
-		if (this.plugin.settings.existingNoteSearchScope === 'specificFolders') {
-			new obsidian.Setting(containerEl)
-				.setName('Specific search folders')
-				.setDesc('Enter folder paths to search (one per line). Leave empty to search all folders.')
-				.addTextArea(text => {
-					text.setPlaceholder('Examples:\nMeetings\nProjects/Work\nDaily Notes');
-					text.setValue(this.plugin.settings.specificSearchFolders.join('\n'));
-					
-					// Save settings immediately on change (without validation and without auto-sync)
-					text.onChange(async (value) => {
-						const folders = value.split('\n').map(f => f.trim()).filter(f => f.length > 0);
-						this.plugin.settings.specificSearchFolders = folders;
-						await this.plugin.saveSettingsWithoutSync();
-					});
-					
-					// Validate only when user finishes editing (on blur)
-					text.inputEl.addEventListener('blur', () => {
-						const value = text.getValue();
-						const folders = value.split('\n').map(f => f.trim()).filter(f => f.length > 0);
-						
-						if (folders.length === 0) {
-							return; // Don't validate if no folders specified
-						}
-						
-						// Validate folder paths
-						const invalidFolders = [];
-						for (const folderPath of folders) {
-							const folder = this.app.vault.getFolderByPath(folderPath);
-							if (!folder) {
-								invalidFolders.push(folderPath);
+			// Apply test mode limit if enabled
+			let documentsToSync = documents;
+			if (this.settings.testMode) {
+				documentsToSync = documents.slice(0, this.settings.testModeLimit);
+				console.log(`Test mode enabled: syncing only ${documentsToSync.length} of ${documents.length} documents`);
+			}
+
+			console.log(`Found ${documents.length} total documents, syncing ${documentsToSync.length}`);
+			this.syncStatus.currentProgress.total = documentsToSync.length;
+			this.syncStatus.currentProgress.processed = 0;
+
+			// Fetch folders if folder support is enabled
+			if (this.settings.includeFolderTags) {
+				const folders = await this.fetchGranolaFolders(token);
+				if (folders) {
+					this.documentToFolderMap = {};
+					for (const folder of folders) {
+						if (folder.document_ids) {
+							for (const docId of folder.document_ids) {
+								this.documentToFolderMap[docId] = folder;
 							}
 						}
-						
-						if (invalidFolders.length > 0) {
-							new obsidian.Notice('Warning: These folders do not exist: ' + invalidFolders.join(', '));
-						}
-					});
-				});
-		}
-
-		// Add info section about avoiding duplicates
-		const infoEl = containerEl.createEl('div', { cls: 'setting-item' });
-		infoEl.createEl('div', { cls: 'setting-item-info' });
-		const infoNameEl = infoEl.createEl('div', { cls: 'setting-item-name' });
-		infoNameEl.setText('⚠️ Avoiding duplicates');
-		const infoDescEl = infoEl.createEl('div', { cls: 'setting-item-description' });
-		infoDescEl.setText('When changing search scope, existing notes in other locations won\'t be found and may be recreated. To avoid duplicates: 1) Move your existing notes to the new search location first, or 2) Use "Entire Vault" to search everywhere, or 3) Run a manual sync after changing settings to test before auto-sync runs.');
-
-		// Create a heading for metadata settings
-		containerEl.createEl('h3', {text: 'Note metadata & tags'});
-
-		new obsidian.Setting(containerEl)
-			.setName('Include attendee tags')
-			.setDesc('Add meeting attendees as tags in the frontmatter of each note')
-			.addToggle(toggle => {
-				toggle.setValue(this.plugin.settings.includeAttendeeTags);
-				toggle.onChange(async (value) => {
-					this.plugin.settings.includeAttendeeTags = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Exclude my name from tags')
-			.setDesc('When adding attendee tags, exclude your own name from the list')
-			.addToggle(toggle => {
-				toggle.setValue(this.plugin.settings.excludeMyNameFromTags);
-				toggle.onChange(async (value) => {
-					this.plugin.settings.excludeMyNameFromTags = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('My name')
-			.setDesc('Your name as it appears in Granola meetings (used to exclude from attendee tags)')
-			.addText(text => {
-				text.setPlaceholder('Danny McClelland');
-				text.setValue(this.plugin.settings.myName);
-				text.onChange(async (value) => {
-					this.plugin.settings.myName = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Attendee tag template')
-			.setDesc('Customize the structure of attendee tags. Use {name} as placeholder for the attendee name. Examples: "person/{name}", "people/{name}", "meeting-attendees/{name}"')
-			.addText(text => {
-				text.setPlaceholder('person/{name}');
-				text.setValue(this.plugin.settings.attendeeTagTemplate);
-				text.onChange(async (value) => {
-					// Validate the template has {name} placeholder
-					if (!value.includes('{name}')) {
-						new obsidian.Notice('Warning: Tag template should include {name} placeholder');
 					}
-					this.plugin.settings.attendeeTagTemplate = value || 'person/{name}';
-					await this.plugin.saveSettings();
-				});
-			});
+				}
+			}
 
-		new obsidian.Setting(containerEl)
-			.setName('Include folder tags')
-			.setDesc('Add Granola folder names as tags in the frontmatter of each note (requires Granola folders to be enabled)')
-			.addToggle(toggle => {
-				toggle.setValue(this.plugin.settings.includeFolderTags);
-				toggle.setDisabled(!this.plugin.settings.enableGranolaFolders);
-				toggle.onChange(async (value) => {
-					this.plugin.settings.includeFolderTags = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Include Granola URL')
-			.setDesc('Add a link back to the original Granola note in the frontmatter (e.g., granola_url: "https://notes.granola.ai/d/...")')
-			.addToggle(toggle => {
-				toggle.setValue(this.plugin.settings.includeGranolaUrl);
-				toggle.onChange(async (value) => {
-					this.plugin.settings.includeGranolaUrl = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		// Create a heading for daily note integration
-		containerEl.createEl('h3', {text: 'Daily note integration'});
-
-		new obsidian.Setting(containerEl)
-			.setName('Daily note integration')
-			.setDesc('Add todays meetings to your daily note')
-			.addToggle(toggle => {
-				toggle.setValue(this.plugin.settings.enableDailyNoteIntegration);
-				toggle.onChange(async (value) => {
-					this.plugin.settings.enableDailyNoteIntegration = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Daily note section name')
-			.setDesc('The heading name for the Granola meetings section in your daily note')
-			.addText(text => {
-				text.setPlaceholder('## Granola Meetings');
-				text.setValue(this.plugin.settings.dailyNoteSectionName);
-				text.onChange(async (value) => {
-					this.plugin.settings.dailyNoteSectionName = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		// Create a heading for periodic note integration
-		containerEl.createEl('h3', {text: 'Periodic note integration'});
-
-		new obsidian.Setting(containerEl)
-			.setName('Periodic note integration')
-			.setDesc('Add todays meetings to your periodic notes (daily, weekly, or monthly - requires Periodic Notes plugin)')
-			.addToggle(toggle => {
-				toggle.setValue(this.plugin.settings.enablePeriodicNoteIntegration);
-				toggle.onChange(async (value) => {
-					this.plugin.settings.enablePeriodicNoteIntegration = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		// Add a warning if Periodic Notes plugin is not available
-		if (!this.plugin.isPeriodicNotesPluginAvailable()) {
-			const warningEl = containerEl.createEl('div', { cls: 'setting-item' });
-			warningEl.createEl('div', { cls: 'setting-item-info' });
-			const warningNameEl = warningEl.createEl('div', { cls: 'setting-item-name' });
-			warningNameEl.setText('⚠️ Periodic Notes plugin not detected');
-			const warningDescEl = warningEl.createEl('div', { cls: 'setting-item-description' });
-			warningDescEl.setText('The Periodic Notes plugin is not installed or enabled. This integration will not work until the plugin is installed.');
-		}
-
-		new obsidian.Setting(containerEl)
-			.setName('Periodic note section name')
-			.setDesc('The heading name for the Granola meetings section in your periodic notes (works with daily, weekly, or monthly notes)')
-			.addText(text => {
-				text.setPlaceholder('## Granola Meetings');
-				text.setValue(this.plugin.settings.periodicNoteSectionName);
-				text.onChange(async (value) => {
-					this.plugin.settings.periodicNoteSectionName = value;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		// Create a heading for Granola folders
-		containerEl.createEl('h3', {text: 'Granola folders'});
-
-		// Debug: Add a simple test toggle first
-		new obsidian.Setting(containerEl)
-			.setName('Test toggle (should work)')
-			.setDesc('This is a test toggle to verify toggle functionality works')
-			.addToggle(toggle => {
-				toggle.setValue(false);
-				toggle.onChange(async (value) => {
-					console.log('Test toggle changed to:', value);
-					new obsidian.Notice('Test toggle works! Value: ' + value);
-				});
-			});
-
-		// Replace the problematic toggle with a button-based approach
-		const folderSetting = new obsidian.Setting(containerEl)
-			.setName('Enable Granola folders')
-			.setDesc('Organize notes into folders based on Granola folder structure. This will create subfolders in your sync directory for each Granola folder.')
-			.addButton(button => {
-				// Ensure the setting exists and has a default value
-				if (this.plugin.settings.enableGranolaFolders === undefined) {
-					this.plugin.settings.enableGranolaFolders = false;
+			// Step 0: Delete all existing notes in the Granola folder for a fresh start
+			console.log('Step 0: Deleting all existing notes in Granola folder...');
+			await this.deleteAllNotesInFolder();
+			
+			// Step 1: Download and save all markdown files first
+			console.log('Step 1: Downloading and saving markdown files...');
+			const markdownFiles = [];
+			
+			for (let i = 0; i < documentsToSync.length; i++) {
+				// Check if sync should be stopped
+				if (this.shouldStopSync) {
+					console.log('Sync stopped by user');
+					this.syncStatus.isRunning = false;
+					this.syncStatus.lastError = 'Sync stopped by user';
+					return;
 				}
 				
-				const updateButton = () => {
-					if (this.plugin.settings.enableGranolaFolders) {
-						button.setButtonText('Disable Granola folders');
-						button.setCta();
-					} else {
-						button.setButtonText('Enable Granola folders');
-						button.setCta(false);
+				const doc = documentsToSync[i];
+				try {
+					// Fetch transcript if enabled
+					if (this.settings.includeFullTranscript) {
+						const transcriptData = await this.fetchTranscript(token, doc.id);
+						doc.transcript = this.transcriptToMarkdown(transcriptData);
 					}
-				};
-				
-				updateButton();
-				
-				button.onClick(async () => {
-					this.plugin.settings.enableGranolaFolders = !this.plugin.settings.enableGranolaFolders;
-					await this.plugin.saveSettings();
-					updateButton();
-					this.display(); // Refresh the settings display
-					new obsidian.Notice(`Granola folders ${this.plugin.settings.enableGranolaFolders ? 'enabled' : 'disabled'}`);
-				});
-			});
 
-		new obsidian.Setting(containerEl)
-			.setName('Folder tag template')
-			.setDesc('Customize the structure of folder tags. Use {name} as placeholder for the folder name. Examples: "folder/{name}", "granola/{name}", "meeting-folders/{name}"')
-			.addText(text => {
-				text.setPlaceholder('folder/{name}');
-				text.setValue(this.plugin.settings.folderTagTemplate);
-				text.setDisabled(!this.plugin.settings.enableGranolaFolders);
-				text.onChange(async (value) => {
-					// Validate the template has {name} placeholder
-					if (!value.includes('{name}')) {
-						new obsidian.Notice('Warning: Tag template should include {name} placeholder');
+					const markdownFile = await this.processDocument(doc);
+					if (markdownFile) {
+						markdownFiles.push(markdownFile);
 					}
-					this.plugin.settings.folderTagTemplate = value || 'folder/{name}';
-					await this.plugin.saveSettings();
-				});
-			});
+					
+					this.syncStatus.currentProgress.processed = i + 1;
+					console.log(`Downloaded ${i + 1}/${documentsToSync.length} notes...`);
+				} catch (error) {
+					console.error('Error processing document ' + doc.title + ':', error);
+					this.syncStatus.lastError = error.message;
+				}
+			}
+			
+			// Check again before bulk import
+			if (this.shouldStopSync) {
+				console.log('Sync stopped by user before import');
+				this.syncStatus.isRunning = false;
+				this.syncStatus.lastError = 'Sync stopped by user';
+				return;
+			}
 
-		// Create a heading for file organization settings
-		containerEl.createEl('h3', {text: 'File organization'});
+			// Step 2: Import all markdown files in bulk
+			console.log(`Step 2: Importing ${markdownFiles.length} markdown files to Apple Notes...`);
+			const syncedCount = await this.importMarkdownFilesBulk(markdownFiles);
+			console.log(`Imported ${syncedCount} notes successfully.`);
 
-		new obsidian.Setting(containerEl)
-			.setName('Sync directory')
-			.setDesc('Directory within your vault where Granola notes will be synced')
-			.addText(text => {
-				text.setPlaceholder('Granola');
-				text.setValue(this.plugin.settings.syncDirectory);
-				text.onChange(async (value) => {
-					this.plugin.settings.syncDirectory = value;
-					await this.plugin.saveSettings();
-				});
-			});
+			this.syncStatus.lastSyncTime = new Date().toISOString();
+			this.syncStatus.lastSyncCount = syncedCount;
+			this.syncStatus.isRunning = false;
+			this.shouldStopSync = false;
+			this.syncStatus.lastError = null;
+			console.log(`Sync complete! ${syncedCount} notes synced.`);
+			
+		} catch (error) {
+			console.error('Granola sync failed:', error);
+			console.error('Error stack:', error.stack);
+			this.syncStatus.isRunning = false;
+			this.shouldStopSync = false;
+			this.syncStatus.lastError = error.message || String(error);
+			this.syncStatus.lastSyncCount = 0;
+		}
+	}
 
-		new obsidian.Setting(containerEl)
-			.setName('Manual sync')
-			.setDesc('Click to manually sync your Granola notes')
-			.addButton(button => {
-				button.setButtonText('Sync now');
-				button.setCta();
-				button.onClick(async () => {
-					await this.plugin.syncNotes();
-				});
-			});
+	getStatus() {
+		return {
+			...this.syncStatus,
+			settings: this.settings
+		};
+	}
 
-		new obsidian.Setting(containerEl)
-			.setName('Find duplicate notes')
-			.setDesc('Find and list notes with the same granola-id (helpful after changing search scope settings)')
-			.addButton(button => {
-				button.setButtonText('Find duplicates');
-				button.onClick(async () => {
-					await this.plugin.findDuplicateNotes();
-				});
-			});
+	stopSync() {
+		this.clearAutoSync();
+		this.shouldStopSync = true;
+		this.syncStatus.isRunning = false;
+		console.log('Sync stop requested');
+	}
 
-		new obsidian.Setting(containerEl)
-			.setName('Re-enable auto-sync')
-			.setDesc('Re-enable auto-sync after testing new search scope settings (this will restart the auto-sync timer)')
-			.addButton(button => {
-				button.setButtonText('Re-enable auto-sync');
-				button.onClick(async () => {
-					await this.plugin.saveSettings(); // This will call setupAutoSync()
-					new obsidian.Notice('Auto-sync re-enabled with current settings');
-				});
-			});
+	setupAutoSync() {
+		this.clearAutoSync();
+		
+		if (this.settings.autoSyncFrequency > 0) {
+			console.log(`Auto-sync enabled: every ${this.settings.autoSyncFrequency / 1000} seconds`);
+			this.autoSyncInterval = setInterval(() => {
+				this.syncNotes();
+			}, this.settings.autoSyncFrequency);
+		}
+	}
 
-		new obsidian.Setting(containerEl)
-			.setName('Reset integration settings')
-			.setDesc('Reset Daily Notes and Periodic Notes integration to disabled (useful if toggles seem stuck)')
-			.addButton(button => {
-				button.setButtonText('Reset integrations');
-				button.onClick(async () => {
-					this.plugin.settings.enableDailyNoteIntegration = false;
-					this.plugin.settings.enablePeriodicNoteIntegration = false;
-					await this.plugin.saveSettings();
-					this.display(); // Refresh the settings display
-					new obsidian.Notice('Integration settings reset to disabled');
-				});
-			});
-
-		new obsidian.Setting(containerEl)
-			.setName('Reset folder settings')
-			.setDesc('Reset Granola folder settings to default values (useful if toggles seem stuck)')
-			.addButton(button => {
-				button.setButtonText('Reset folder settings');
-				button.onClick(async () => {
-					this.plugin.settings.enableGranolaFolders = false;
-					this.plugin.settings.includeFolderTags = false;
-					this.plugin.settings.folderTagTemplate = 'folder/{name}';
-					await this.plugin.saveSettings();
-					this.display(); // Refresh the settings display
-					new obsidian.Notice('Folder settings reset to defaults');
-				});
-			});
+	clearAutoSync() {
+		if (this.autoSyncInterval) {
+			clearInterval(this.autoSyncInterval);
+			this.autoSyncInterval = null;
+		}
 	}
 }
 
-module.exports = GranolaSyncPlugin;
+// Main execution
+if (require.main === module) {
+	const sync = new GranolaToAppleNotes();
+	
+	// Check command line arguments
+	const args = process.argv.slice(2);
+	
+	if (args.includes('--help') || args.includes('-h')) {
+		console.log(`
+Granola to Apple Notes Sync
+
+Usage:
+  node main.js [options]
+  node ui-server.js    Start web UI server
+
+Options:
+  --sync, -s          Run a single sync now
+  --auto-sync, -a     Start auto-sync (runs continuously)
+  --ui, -u            Start web UI server
+  --help, -h          Show this help message
+
+Examples:
+  node main.js --sync        # Sync once
+  node main.js --auto-sync   # Start auto-sync
+  node ui-server.js          # Start web UI
+		`);
+		process.exit(0);
+	}
+	
+	if (args.includes('--ui') || args.includes('-u')) {
+		// Start UI server
+		require('./ui-server');
+	} else if (args.includes('--auto-sync') || args.includes('-a')) {
+		sync.setupAutoSync();
+		// Keep process alive
+		process.stdin.resume();
+	} else {
+		// Default: single sync
+		sync.syncNotes().then(() => {
+			process.exit(0);
+		}).catch((error) => {
+			console.error('Sync failed:', error);
+			process.exit(1);
+		});
+	}
+}
+
+module.exports = GranolaToAppleNotes;

@@ -1,0 +1,21 @@
+{
+  "notePrefix": "",
+  "authKeyPath": "Library/Application Support/Granola/supabase.json",
+  "filenameTemplate": "{title}",
+  "dateFormat": "YYYY-MM-DD",
+  "autoSyncFrequency": 300000,
+  "includeFullTranscript": false,
+  "skipExistingNotes": false,
+  "includeAttendeeTags": false,
+  "excludeMyNameFromTags": true,
+  "myName": "",
+  "includeFolderTags": false,
+  "includeGranolaUrl": false,
+  "attendeeTagTemplate": "person/{name}",
+  "folderTagTemplate": "folder/{name}",
+  "appleNotesAccount": "iCloud",
+  "appleNotesFolder": "",
+  "testMode": false,
+  "testModeLimit": 10
+}
+

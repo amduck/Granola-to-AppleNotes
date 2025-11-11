@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Granola to Apple Notes Sync</title>
+	<style>
+		* {
+			margin: 0;
+			padding: 0;
+			box-sizing: border-box;
+		}
+
+		body {
+			font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+			background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+			min-height: 100vh;
+			padding: 20px;
+		}
+
+		.container {
+			max-width: 900px;
+			margin: 0 auto;
+			background: white;
+			border-radius: 12px;
+			box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+			overflow: hidden;
+		}
+
+		.header {
+			background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+			color: white;
+			padding: 30px;
+			text-align: center;
+		}
+
+		.header h1 {
+			font-size: 28px;
+			margin-bottom: 10px;
+		}
+
+		.header p {
+			opacity: 0.9;
+			font-size: 14px;
+		}
+
+		.content {
+			padding: 30px;
+		}
+
+		.status-card {
+			background: #f8f9fa;
+			border-radius: 8px;
+			padding: 20px;
+			margin-bottom: 20px;
+		}
+
+		.status-card h2 {
+			font-size: 18px;
+			margin-bottom: 15px;
+			color: #333;
+		}
+
+		.status-item {
+			display: flex;
+			justify-content: space-between;
+			padding: 10px 0;
+			border-bottom: 1px solid #e0e0e0;
+		}
+
+		.status-item:last-child {
+			border-bottom: none;
+		}
+
+		.status-label {
+			font-weight: 600;
+			color: #666;
+		}
+
+		.status-value {
+			color: #333;
+		}
+
+		.status-value.running {
+			color: #667eea;
+			font-weight: 600;
+		}
+
+		.status-value.success {
+			color: #28a745;
+		}
+
+		.status-value.error {
+			color: #dc3545;
+		}
+
+		.progress-bar {
+			width: 100%;
+			height: 24px;
+			background: #e0e0e0;
+			border-radius: 12px;
+			overflow: hidden;
+			margin-top: 10px;
+		}
+
+		.progress-fill {
+			height: 100%;
+			background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+			transition: width 0.3s ease;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			color: white;
+			font-size: 12px;
+			font-weight: 600;
+		}
+
+		.controls {
+			display: flex;
+			gap: 10px;
+			margin-bottom: 20px;
+		}
+
+		.btn {
+			flex: 1;
+			padding: 12px 24px;
+			border: none;
+			border-radius: 6px;
+			font-size: 16px;
+			font-weight: 600;
+			cursor: pointer;
+			transition: all 0.3s ease;
+		}
+
+		.btn:disabled {
+			opacity: 0.5;
+			cursor: not-allowed;
+		}
+
+		.btn-start {
+			background: #28a745;
+			color: white;
+		}
+
+		.btn-start:hover:not(:disabled) {
+			background: #218838;
+			transform: translateY(-2px);
+			box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
+		}
+
+		.btn-stop {
+			background: #dc3545;
+			color: white;
+		}
+
+		.btn-stop:hover:not(:disabled) {
+			background: #c82333;
+			transform: translateY(-2px);
+		}
+
+		.btn-delete {
+			background: #ff6b6b;
+			color: white;
+		}
+
+		.btn-delete:hover:not(:disabled) {
+			background: #ee5a5a;
+			transform: translateY(-2px);
+			box-shadow: 0 4px 12px rgba(255, 107, 107, 0.4);
+		}
+
+		.config-section {
+			background: #f8f9fa;
+			border-radius: 8px;
+			padding: 20px;
+			margin-top: 20px;
+		}
+
+		.config-section h2 {
+			font-size: 18px;
+			margin-bottom: 15px;
+			color: #333;
+		}
+
+		.config-grid {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+			gap: 15px;
+		}
+
+		.config-item {
+			background: white;
+			padding: 15px;
+			border-radius: 6px;
+			border: 1px solid #e0e0e0;
+		}
+
+		.config-label {
+			font-size: 12px;
+			color: #666;
+			margin-bottom: 5px;
+			text-transform: uppercase;
+			letter-spacing: 0.5px;
+		}
+
+		.config-value {
+			font-size: 14px;
+			color: #333;
+			font-weight: 600;
+			word-break: break-word;
+		}
+
+		.config-value.boolean-true {
+			color: #28a745;
+		}
+
+		.config-value.boolean-false {
+			color: #666;
+		}
+
+		.toggle-switch {
+			position: relative;
+			display: inline-block;
+			width: 50px;
+			height: 24px;
+			margin-left: 10px;
+		}
+
+		.toggle-switch input {
+			opacity: 0;
+			width: 0;
+			height: 0;
+		}
+
+		.toggle-slider {
+			position: absolute;
+			cursor: pointer;
+			top: 0;
+			left: 0;
+			right: 0;
+			bottom: 0;
+			background-color: #ccc;
+			transition: .4s;
+			border-radius: 24px;
+		}
+
+		.toggle-slider:before {
+			position: absolute;
+			content: "";
+			height: 18px;
+			width: 18px;
+			left: 3px;
+			bottom: 3px;
+			background-color: white;
+			transition: .4s;
+			border-radius: 50%;
+		}
+
+		input:checked + .toggle-slider {
+			background-color: #28a745;
+		}
+
+		input:checked + .toggle-slider:before {
+			transform: translateX(26px);
+		}
+
+		input:disabled + .toggle-slider {
+			opacity: 0.5;
+			cursor: not-allowed;
+		}
+
+		.test-mode-control {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+		}
+
+		.test-mode-label {
+			display: flex;
+			align-items: center;
+			gap: 10px;
+		}
+
+		.config-input {
+			width: 100%;
+			padding: 8px 12px;
+			border: 1px solid #ddd;
+			border-radius: 4px;
+			font-size: 14px;
+			font-family: inherit;
+			margin-top: 5px;
+		}
+
+		.config-input:focus {
+			outline: none;
+			border-color: #667eea;
+			box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
+		}
+
+		.config-input-container {
+			display: flex;
+			flex-direction: column;
+		}
+
+		.config-save-btn {
+			background: #667eea;
+			color: white;
+			border: none;
+			padding: 4px 12px;
+			border-radius: 4px;
+			cursor: pointer;
+			font-size: 12px;
+			margin-top: 5px;
+			align-self: flex-start;
+		}
+
+		.config-save-btn:hover {
+			background: #5568d3;
+		}
+
+		.config-save-btn:disabled {
+			opacity: 0.5;
+			cursor: not-allowed;
+		}
+
+		.refresh-btn {
+			background: #667eea;
+			color: white;
+			border: none;
+			padding: 8px 16px;
+			border-radius: 4px;
+			cursor: pointer;
+			font-size: 14px;
+			margin-top: 10px;
+		}
+
+		.refresh-btn:hover {
+			background: #5568d3;
+		}
+
+		.error-message {
+			background: #fff3cd;
+			border: 1px solid #ffc107;
+			border-radius: 6px;
+			padding: 15px;
+			margin-top: 20px;
+			color: #856404;
+		}
+	</style>
+</head>
+<body>
+	<div class="container">
+		<div class="header">
+			<h1>🍎 Granola to Apple Notes Sync</h1>
+			<p>Control panel for syncing your Granola meeting notes</p>
+		</div>
+
+		<div class="content">
+			<div class="status-card">
+				<h2>Sync Status</h2>
+				<div class="status-item">
+					<span class="status-label">Status:</span>
+					<span class="status-value" id="status">Idle</span>
+				</div>
+				<div class="status-item">
+					<span class="status-label">Last Sync:</span>
+					<span class="status-value" id="lastSync">Never</span>
+				</div>
+				<div class="status-item">
+					<span class="status-label">Notes Synced:</span>
+					<span class="status-value" id="notesSynced">0</span>
+				</div>
+				<div id="progressContainer" style="display: none;">
+					<div class="status-item">
+						<span class="status-label">Progress:</span>
+						<span class="status-value" id="progressText">0 / 0</span>
+					</div>
+					<div class="progress-bar">
+						<div class="progress-fill" id="progressBar" style="width: 0%">0%</div>
+					</div>
+				</div>
+			</div>
+
+			<div class="controls">
+				<button class="btn btn-start" id="startBtn" onclick="startSync()">Start Sync</button>
+				<button class="btn btn-stop" id="stopBtn" onclick="stopSync()" disabled>Stop Sync</button>
+				<button class="btn btn-delete" id="deleteBtn" onclick="deleteAllNotes()">Delete All Notes</button>
+			</div>
+
+			<div id="errorMessage" class="error-message" style="display: none;"></div>
+
+			<div class="config-section">
+				<h2>Configuration</h2>
+				<button class="refresh-btn" onclick="loadConfig()">Refresh Config</button>
+				<div class="config-grid" id="configGrid">
+					<!-- Config items will be populated here -->
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<script>
+		let statusInterval = null;
+
+		function formatDate(dateString) {
+			if (!dateString) return 'Never';
+			const date = new Date(dateString);
+			return date.toLocaleString();
+		}
+
+		function formatBoolean(value) {
+			return value ? 'Yes' : 'No';
+		}
+
+		function formatValue(key, value) {
+			if (typeof value === 'boolean') {
+				return formatBoolean(value);
+			}
+			if (key === 'autoSyncFrequency') {
+				if (value === 0) return 'Disabled';
+				const minutes = value / 60000;
+				if (minutes < 60) return `${minutes} minutes`;
+				return `${minutes / 60} hours`;
+			}
+			if (value === null || value === undefined) return 'Not set';
+			if (value === '') return '(empty)';
+			return String(value);
+		}
+
+		function updateStatus(data) {
+			const statusEl = document.getElementById('status');
+			const lastSyncEl = document.getElementById('lastSync');
+			const notesSyncedEl = document.getElementById('notesSynced');
+			const progressContainer = document.getElementById('progressContainer');
+			const progressBar = document.getElementById('progressBar');
+			const progressText = document.getElementById('progressText');
+			const startBtn = document.getElementById('startBtn');
+			const stopBtn = document.getElementById('stopBtn');
+			const errorMessage = document.getElementById('errorMessage');
+
+			// Update status
+			if (data.isRunning) {
+				statusEl.textContent = 'Running...';
+				statusEl.className = 'status-value running';
+				startBtn.disabled = true;
+				startBtn.textContent = 'Starting...'; // Show starting state
+				stopBtn.disabled = false;
+				progressContainer.style.display = 'block';
+			} else {
+				statusEl.textContent = 'Idle';
+				statusEl.className = 'status-value';
+				startBtn.disabled = false;
+				startBtn.textContent = 'Start Sync'; // Always reset to original text when not running
+				stopBtn.disabled = true;
+				progressContainer.style.display = 'none';
+			}
+
+			// Update last sync
+			lastSyncEl.textContent = formatDate(data.lastSyncTime);
+			if (data.lastSyncTime) {
+				lastSyncEl.className = 'status-value success';
+			}
+
+			// Update notes synced
+			notesSyncedEl.textContent = data.lastSyncCount || 0;
+			if (data.lastSyncCount > 0) {
+				notesSyncedEl.className = 'status-value success';
+			}
+
+			// Update progress
+			if (data.currentProgress && data.currentProgress.total > 0) {
+				const percent = Math.round((data.currentProgress.processed / data.currentProgress.total) * 100);
+				progressBar.style.width = percent + '%';
+				progressBar.textContent = percent + '%';
+				progressText.textContent = `${data.currentProgress.processed} / ${data.currentProgress.total}`;
+			}
+
+			// Update error
+			if (data.lastError) {
+				errorMessage.textContent = `Error: ${data.lastError}`;
+				errorMessage.style.display = 'block';
+			} else {
+				errorMessage.style.display = 'none';
+			}
+		}
+
+		// Store preserved input values globally to survive config rebuilds
+		let preservedInputValues = {};
+		
+		function updateConfig(settings) {
+			const configGrid = document.getElementById('configGrid');
+			
+			// Preserve input values before rebuilding if they exist and are different from settings
+			const testModeLimitInput = document.getElementById('input-testModeLimit');
+			if (testModeLimitInput) {
+				const currentValue = parseInt(testModeLimitInput.value, 10);
+				if (!isNaN(currentValue)) {
+					const settingsValue = settings.testModeLimit || 10;
+					// Preserve if different from settings (user is editing) or if already preserved
+					if (currentValue !== settingsValue || preservedInputValues.testModeLimit !== undefined) {
+						preservedInputValues.testModeLimit = currentValue;
+					}
+				}
+			}
+			
+			configGrid.innerHTML = '';
+
+			const configItems = [
+				{ key: 'testMode', label: 'Test Mode', isToggle: true },
+				{ key: 'testModeLimit', label: 'Test Mode Limit', isEditable: true, type: 'number', min: 1, default: 10 },
+				{ key: 'appleNotesAccount', label: 'Apple Notes Account' },
+				{ key: 'appleNotesFolder', label: 'Apple Notes Folder' },
+				{ key: 'autoSyncFrequency', label: 'Auto Sync Frequency' },
+				{ key: 'includeFullTranscript', label: 'Include Full Transcript' },
+				{ key: 'skipExistingNotes', label: 'Skip Existing Notes' },
+				{ key: 'includeAttendeeTags', label: 'Include Attendee Tags' },
+				{ key: 'includeGranolaUrl', label: 'Include Granola URL' },
+				{ key: 'dateFormat', label: 'Date Format' },
+				{ key: 'filenameTemplate', label: 'Filename Template' },
+			];
+
+			configItems.forEach(item => {
+				const value = settings[item.key];
+				const configItem = document.createElement('div');
+				configItem.className = 'config-item';
+				
+				const label = document.createElement('div');
+				label.className = 'config-label';
+				label.textContent = item.label;
+				
+				const valueEl = document.createElement('div');
+				valueEl.className = 'config-value';
+				
+				if (item.isToggle && typeof value === 'boolean') {
+					// Create toggle switch for test mode
+					valueEl.className = 'test-mode-control';
+					valueEl.id = `config-${item.key}`;
+					
+					const labelContainer = document.createElement('div');
+					labelContainer.className = 'test-mode-label';
+					
+					const statusText = document.createElement('span');
+					statusText.id = `status-${item.key}`;
+					statusText.textContent = value ? 'Enabled' : 'Disabled';
+					statusText.style.color = value ? '#28a745' : '#666';
+					statusText.style.fontWeight = '600';
+					
+					const toggleContainer = document.createElement('label');
+					toggleContainer.className = 'toggle-switch';
+					
+					const checkbox = document.createElement('input');
+					checkbox.type = 'checkbox';
+					checkbox.id = `toggle-${item.key}`;
+					checkbox.checked = value;
+					checkbox.addEventListener('change', () => toggleTestMode(checkbox.checked, statusText, checkbox));
+					
+					const slider = document.createElement('span');
+					slider.className = 'toggle-slider';
+					
+					toggleContainer.appendChild(checkbox);
+					toggleContainer.appendChild(slider);
+					
+					labelContainer.appendChild(statusText);
+					labelContainer.appendChild(toggleContainer);
+					
+					valueEl.appendChild(labelContainer);
+				} else if (item.isEditable && item.type === 'number') {
+					// Create editable number input for test mode limit
+					valueEl.className = 'config-input-container';
+					
+					const input = document.createElement('input');
+					input.type = 'number';
+					input.className = 'config-input';
+					input.id = `input-${item.key}`;
+					// Use preserved value if available (user has edited it), otherwise use settings value or default
+					input.value = preservedInputValues[item.key] || value || item.default || 10;
+					input.min = item.min || 1;
+					input.placeholder = `Default: ${item.default || 10}`;
+					
+					const saveBtn = document.createElement('button');
+					saveBtn.className = 'config-save-btn';
+					saveBtn.textContent = 'Save';
+					saveBtn.id = `save-${item.key}`;
+					
+					// Save on button click
+					saveBtn.addEventListener('click', () => updateTestModeLimit(item.key, input.value, saveBtn));
+					
+					// Also save on Enter key
+					input.addEventListener('keypress', (e) => {
+						if (e.key === 'Enter') {
+							updateTestModeLimit(item.key, input.value, saveBtn);
+						}
+					});
+					
+					valueEl.appendChild(input);
+					valueEl.appendChild(saveBtn);
+				} else {
+					// Regular display for other config items
+					if (typeof value === 'boolean') {
+						valueEl.className += value ? ' boolean-true' : ' boolean-false';
+					}
+					valueEl.textContent = formatValue(item.key, value);
+				}
+				
+				configItem.appendChild(label);
+				configItem.appendChild(valueEl);
+				configGrid.appendChild(configItem);
+			});
+		}
+
+		async function updateTestModeLimit(key, value, saveBtn) {
+			const numValue = parseInt(value, 10);
+			if (isNaN(numValue) || numValue < 1) {
+				alert('Test Mode Limit must be a positive number');
+				return;
+			}
+			
+			// Get the input element to preserve its value
+			const input = document.getElementById(`input-${key}`);
+			const originalValue = input.value;
+			
+			try {
+				saveBtn.disabled = true;
+				saveBtn.textContent = 'Saving...';
+				
+				const response = await fetch('/api/config', {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json'
+					},
+					body: JSON.stringify({ [key]: numValue })
+				});
+				
+				if (!response.ok) {
+					throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+				}
+				
+				const data = await response.json();
+				if (data.success) {
+					// Update input value to match what was saved
+					if (input) {
+						input.value = numValue;
+					}
+					
+					// Clear preserved value since settings now match the input
+					// This ensures future config reloads use the saved settings value
+					delete preservedInputValues[key];
+					
+					saveBtn.textContent = 'Saved!';
+					
+					// Wait a bit before allowing config reload to ensure backend has saved
+					setTimeout(() => {
+						saveBtn.textContent = 'Save';
+						saveBtn.disabled = false;
+					}, 1500);
+					
+					// Reload status after a delay to get updated settings
+					// The preserved value is cleared, so it will use the saved settings value
+					setTimeout(async () => {
+						await loadStatus();
+					}, 2000);
+				} else {
+					throw new Error(data.error || 'Failed to update config');
+				}
+			} catch (error) {
+				console.error('Error updating test mode limit:', error);
+				alert('Error updating test mode limit: ' + error.message);
+				// Restore original value on error
+				if (input) {
+					input.value = originalValue;
+				}
+				saveBtn.disabled = false;
+				saveBtn.textContent = 'Save';
+			}
+		}
+
+		async function toggleTestMode(enabled, statusTextElement, checkboxElement) {
+			try {
+				// Disable the toggle while updating
+				if (checkboxElement) checkboxElement.disabled = true;
+				
+				// Update status text immediately for better UX
+				if (statusTextElement) {
+					statusTextElement.textContent = enabled ? 'Enabled' : 'Disabled';
+					statusTextElement.style.color = enabled ? '#28a745' : '#666';
+				}
+				
+				const response = await fetch('/api/config', {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json'
+					},
+					body: JSON.stringify({ testMode: enabled })
+				});
+				
+				if (!response.ok) {
+					throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+				}
+				
+				const data = await response.json();
+				if (data.success) {
+					// Reload config to ensure sync
+					await loadConfig();
+					// Also reload status to get updated settings
+					await loadStatus();
+				} else {
+					throw new Error(data.error || 'Failed to update config');
+				}
+			} catch (error) {
+				console.error('Error toggling test mode:', error);
+				alert('Error updating test mode: ' + error.message);
+				// Revert toggle on error
+				if (checkboxElement) {
+					checkboxElement.checked = !enabled;
+					if (statusTextElement) {
+						statusTextElement.textContent = !enabled ? 'Enabled' : 'Disabled';
+						statusTextElement.style.color = !enabled ? '#28a745' : '#666';
+					}
+				}
+			} finally {
+				// Re-enable toggle
+				if (checkboxElement) checkboxElement.disabled = false;
+			}
+		}
+
+		async function loadStatus() {
+			try {
+				const response = await fetch('/api/status');
+				const data = await response.json();
+				updateStatus(data);
+				// Only update config if settings are provided and different
+				// This prevents unnecessary rebuilds that reset input values
+				if (data.settings) {
+					updateConfig(data.settings);
+				}
+			} catch (error) {
+				console.error('Error loading status:', error);
+			}
+		}
+
+		async function loadConfig() {
+			try {
+				const response = await fetch('/api/config');
+				const settings = await response.json();
+				updateConfig(settings);
+			} catch (error) {
+				console.error('Error loading config:', error);
+			}
+		}
+
+		async function startSync() {
+			const startBtn = document.getElementById('startBtn');
+			
+			try {
+				// Don't change button text here - let updateStatus() handle it
+				startBtn.disabled = true;
+				
+				const response = await fetch('/api/start', { 
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json'
+					}
+				});
+				
+				if (!response.ok) {
+					const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
+					throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+				}
+				
+				const data = await response.json();
+				if (data.success) {
+					// Sync started successfully - status will update via polling
+					// Immediately check status to update button state
+					await loadStatus();
+				} else {
+					alert('Error starting sync: ' + (data.error || 'Unknown error'));
+					// Reset button state on error
+					await loadStatus();
+				}
+			} catch (error) {
+				console.error('Start sync error:', error);
+				alert('Error starting sync: ' + error.message);
+				// Reset button state on error
+				await loadStatus();
+			}
+		}
+
+		async function stopSync() {
+			try {
+				const response = await fetch('/api/stop', { method: 'POST' });
+				const data = await response.json();
+				if (data.success) {
+					loadStatus();
+				}
+			} catch (error) {
+				alert('Error stopping sync: ' + error.message);
+			}
+		}
+
+		async function deleteAllNotes() {
+			if (!confirm('Are you sure you want to delete ALL notes in the Granola folder? This action cannot be undone.')) {
+				return;
+			}
+
+			const deleteBtn = document.getElementById('deleteBtn');
+			deleteBtn.disabled = true;
+			deleteBtn.textContent = 'Deleting...';
+
+			try {
+				const response = await fetch('/api/delete-notes', { 
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json'
+					}
+				});
+				
+				if (!response.ok) {
+					const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
+					throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+				}
+				
+				const data = await response.json();
+				if (data.success) {
+					alert(`Successfully deleted ${data.deletedCount} notes from the Granola folder.`);
+					loadStatus();
+				} else {
+					alert('Error deleting notes: ' + (data.error || 'Unknown error'));
+				}
+			} catch (error) {
+				console.error('Delete error:', error);
+				alert('Error deleting notes: ' + error.message);
+			} finally {
+				deleteBtn.disabled = false;
+				deleteBtn.textContent = 'Delete All Notes';
+			}
+		}
+
+		// Load initial status and start polling
+		loadStatus();
+		loadConfig();
+		statusInterval = setInterval(loadStatus, 2000); // Update every 2 seconds
+
+		// Cleanup on page unload
+		window.addEventListener('beforeunload', () => {
+			if (statusInterval) {
+				clearInterval(statusInterval);
+			}
+		});
+	</script>
+</body>
+</html>
+

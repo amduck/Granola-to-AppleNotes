@@ -1,2 +1,17 @@
-data.json
+# Config file with potentially sensitive data
+config.json
+
+# Temporary files
+.temp-note-metadata.json
+.temp-note-content.txt
+.temp-*.md
+*.tmp
+
+# Node modules (if you add dependencies later)
+node_modules/
+
+# macOS
 .DS_Store
+
+# Logs
+*.log

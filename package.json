@@ -1,0 +1,24 @@
+{
+  "name": "granola-to-apple-notes",
+  "version": "1.0.0",
+  "description": "Sync Granola AI meeting notes to Apple Notes",
+  "main": "main.js",
+  "scripts": {
+    "sync": "node main.js --sync",
+    "auto-sync": "node main.js --auto-sync",
+    "ui": "node ui-server.js",
+    "start": "node ui-server.js"
+  },
+  "keywords": [
+    "granola",
+    "apple-notes",
+    "sync",
+    "meeting-notes"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=12.0.0"
+  }
+}
+
