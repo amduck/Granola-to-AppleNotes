@@ -2,6 +2,121 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0] - 2025-01-XX
+
+### Added
+- **🌐 Web UI**: Modern web interface for controlling sync operations
+  - Start/stop sync functionality
+  - Real-time status monitoring with progress bar
+  - Delete all notes functionality
+  - Test mode toggle with configurable limit
+  - Configuration display and management
+  - Error reporting and status updates
+
+- **🔄 Bulk Sync Process**: Efficient bulk import workflow
+  - Delete all existing notes in target folder before sync
+  - Download all notes as markdown files first
+  - Bulk import all notes with proper line break handling
+  - Prevents duplicate notes and ensures consistency
+
+- **🧪 Test Mode**: Safe testing functionality
+  - Toggle test mode on/off via web UI
+  - Configurable test mode limit (default: 10 notes)
+  - Allows testing sync before syncing all notes
+  - Limit can be adjusted in web UI
+
+- **📊 Status Monitoring**: Real-time sync status
+  - Live progress tracking (X/Y notes processed)
+  - Last sync time and note count
+  - Error messages and status updates
+  - Auto-refreshing status display
+
+- **🗑️ Delete All Notes**: One-click deletion
+  - Delete all notes in the configured Apple Notes folder
+  - Confirmation dialog for safety
+  - Returns count of deleted notes
+
+- **📋 Content Conversion**: ProseMirror to Markdown conversion
+  - Converts Granola's ProseMirror format to clean Markdown
+  - Preserves headings, lists, and formatting
+  - Handles nested content structures
+
+- **📁 Apple Notes Integration**: Direct Apple Notes integration
+  - Uses AppleScript for reliable note creation
+  - Supports multiple Apple Notes accounts (iCloud, On My Mac, etc.)
+  - Automatic folder creation if it doesn't exist
+  - Proper line break handling (Unix newlines → AppleScript returns)
+
+- **⚙️ Configuration System**: Comprehensive configuration
+  - JSON-based configuration file (`config.json`)
+  - Example configuration file provided
+  - Web UI for test mode and limit configuration
+  - Support for all Granola sync settings
+
+- **🔗 Granola URL Links**: Optional links back to original notes
+  - Configurable inclusion of Granola URLs
+  - Links stored in note metadata
+
+- **📝 Metadata Support**: Rich note metadata
+  - Granola ID tracking for duplicate detection
+  - Creation and update timestamps
+  - Optional attendee tags
+  - Optional folder tags
+
+### Changed
+- **Complete Refactor**: Converted from Obsidian plugin to standalone Node.js application
+  - Removed Obsidian-specific code
+  - Replaced file system operations with AppleScript automation
+  - Changed from plugin architecture to web application
+
+- **Sync Strategy**: Changed from incremental updates to full resync
+  - Deletes all notes before importing
+  - Ensures consistency and prevents duplicates
+  - Handles title preservation correctly
+
+- **Line Break Handling**: Improved newline conversion
+  - Properly converts Unix newlines (`\n`) to AppleScript return characters
+  - Ensures notes display with correct line breaks in Apple Notes
+
+### Technical
+- **Node.js Application**: Standalone Node.js application (not a plugin)
+- **HTTP Server**: Built-in web server for UI (`ui-server.js`)
+- **AppleScript Integration**: Direct AppleScript execution for Apple Notes
+- **API Integration**: Granola API integration with pagination support
+- **Error Handling**: Comprehensive error handling and reporting
+- **Status Tracking**: Real-time status tracking for sync operations
+
+### Fixed
+- **Title Preservation**: Fixed issue where note titles were lost on resync
+- **Line Breaks**: Fixed continuous text issue - notes now display with proper line breaks
+- **Stop Sync**: Fixed stop sync button to properly cancel ongoing sync operations
+- **Button States**: Fixed button text not reverting after sync completes
+- **Config Saving**: Fixed test mode limit not being saved due to premature page refresh
+
+### Removed
+- **Obsidian Dependencies**: Removed all Obsidian plugin code
+- **File System Operations**: Removed direct file system note creation
+- **Daily Notes Integration**: Removed Obsidian Daily Notes integration
+- **Periodic Notes Integration**: Removed Obsidian Periodic Notes integration
+- **Obsidian Settings UI**: Replaced with web UI
+
+### Migration Notes
+- This is a complete rewrite from the original Obsidian plugin
+- Users migrating from the Obsidian version will need to:
+  1. Install Node.js
+  2. Run `npm install`
+  3. Configure `config.json`
+  4. Use the web UI instead of Obsidian settings
+
+---
+
+## Previous Versions (Obsidian Plugin)
+
+The following changelog entries are from the original Granola to Obsidian plugin that this project was forked from. They are kept for historical reference.
+
+<details>
+<summary>Click to expand Obsidian plugin changelog</summary>
+
 ## [1.6.0]
 ### Added
 - **🗓️ Periodic Notes Integration**: New support for the Periodic Notes plugin alongside existing Daily Notes integration
@@ -233,4 +348,6 @@ All notable changes to this project will be documented in this file.
 - Initial release of Granola Sync plugin
 - Basic sync functionality for Granola AI notes
 - Automatic content conversion from ProseMirror to Markdown
-- Frontmatter with metadata support 
+- Frontmatter with metadata support
+
+</details>
